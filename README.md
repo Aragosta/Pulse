@@ -7,23 +7,23 @@ The IR in the middle is the only contract: everything above writes it, everythin
 
 ```mermaid
 flowchart TB
-    L1["<b>1 · Frontends</b><br/>✅ hand-written Rust IR · ⬜ Python · ⬜ Modelica via Rumoca · ⬜ FMI import"]:::partial
-    L2["<b>2 · Pulse IR</b> · crates/pulse-ir<br/>✅ blocks, rates, holds, delays, sensors, budgets, JSON v3, validate()<br/>⬜ typed ports · FSMs as data · expression language · rational clocks"]:::partial
-    L3["<b>3 · Checks</b><br/>🟡 Class 1 temporal · ⬜ Class 2 structural · ⬜ Class 3 symbolic"]:::partial
-    L4["<b>4 · WCET provider</b><br/>⬜ static bound per block, with provenance"]:::todo
-    L5["<b>5 · Codegen</b><br/>✅ copperconfig.ron · 🟡 task glue, hand-written · ⬜ physics code"]:::partial
-    L6["<b>6 · Block library</b> · crates/pulse-joint<br/>✅ no_std controllers, sensor model, thermal FSM"]:::partial
-    L7["<b>7 · Runtime targets</b><br/>✅ host + simulated plant · ⬜ RP2350 · ⬜ Cortex-M4F"]:::partial
-    L8["<b>8 · Interfaces</b><br/>🟡 CLI report · ⬜ MCP server"]:::partial
-    L9["<b>9 · Policy blocks + runtime assurance</b><br/>⬜ black-box policy, monitor, fallback"]:::todo
+    L1["<b>1 · Frontends</b><br/>built: none · the one IR is hand-written in the example<br/>to build: Python · Modelica via Rumoca · FMI import"]
+    L2["<b>2 · Pulse IR</b> · crates/pulse-ir<br/>built: first draft · blocks, rates, holds, delays, budgets, JSON, validation<br/>to build: typed ports · FSMs as data · expression language · rational clocks"]
+    L3["<b>3 · Checks</b><br/>built: Class 1 prototype, tried on one example<br/>to build: rest of Class 1 · Class 2 · Class 3"]
+    L4["<b>4 · WCET provider</b><br/>built: none · budgets are assumed, not proven<br/>to build: static bound per block"]
+    L5["<b>5 · Codegen</b><br/>built: copperconfig.ron only<br/>to build: task glue · physics code"]
+    L6["<b>6 · Block library</b> · crates/pulse-joint<br/>built: one joint's controllers, sensor model, thermal FSM<br/>to build: generic, reusable blocks"]
+    L7["<b>7 · Runtime targets</b><br/>built: host simulation only<br/>to build: RP2350 · Cortex-M4F"]
+    L8["<b>8 · Interfaces</b><br/>built: none · the example prints a report<br/>to build: CLI · MCP server"]
+    L9["<b>9 · Policy blocks + runtime assurance</b><br/>built: none<br/>to build: black-box policy · monitor · fallback"]
 
     L1 --> L2 --> L3 --> L4 --> L5 --> L6 --> L7 --> L8 --> L9
 
-    classDef partial fill:#fff3bf,stroke:#e67700,color:#5c3d00
-    classDef todo fill:#f1f3f5,stroke:#868e96,color:#343a40,stroke-dasharray:4 3
+    classDef default fill:#fff,stroke:#000,color:#000
+    linkStyle default stroke:#000
 ```
 
-✅ have · 🟡 partly there · ⬜ to build. Yellow layer: started · grey dashed layer: not started. Read top to bottom: each layer builds on the ones above it.
+Read top to bottom: each layer builds on the ones above it. Everything built so far is a proof of concept on the single-joint example.
 
 | # | Layer | What it does | Have | Build next |
 |---|---|---|---|---|
