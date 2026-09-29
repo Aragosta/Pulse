@@ -98,7 +98,7 @@ impl ThermalFsm {
     }
     pub fn update(&mut self, temp: f32) -> u8 {
         self.state = match self.state {
-            _ if temp > T_FAULT => FAULT,
+            _ if temp > T_FAULT || temp.is_nan() => FAULT, // a broken (NaN) sensor faults too
             FAULT => FAULT,
             NOMINAL if temp > T_DERATE => DERATING,
             DERATING if temp < T_RECOVER => NOMINAL,
@@ -106,7 +106,7 @@ impl ThermalFsm {
         };
         self.state
     }
-    /// Current-limit scale for a state.
+    /// Current-limit scale for a state. Unknown states get 0 (fail safe).
     pub fn scale(state: u8) -> f32 {
         match state {
             NOMINAL => 1.0,
@@ -123,6 +123,7 @@ impl Default for ThermalFsm {
 }
 
 /// Current PI (8 kHz): clamped setpoint -> volts. Fault forces zero volts and clears the integrator.
+/// Non-finite inputs fail safe: a NaN setpoint or scale commands 0 A, never an unclamped or full-scale current.
 pub struct CurrentCtl(Pid<f32>);
 
 pub struct CurrentOut {
@@ -138,8 +139,18 @@ impl CurrentCtl {
         ))
     }
     pub fn update(&mut self, wanted: f32, measured: f32, scale: f32, state: u8) -> CurrentOut {
-        let lim = I_MAX * scale;
-        let setpoint = wanted.max(-lim).min(lim); // not clamp(): that panics on NaN bounds
+        // Not clamp(): it panics on NaN bounds. Not bare max/min either: f32::max(NaN, x) == x, so a NaN setpoint
+        // would come out as -lim (full reverse current). NaN fails every comparison, so these map it to 0.
+        let lim = if scale >= 0.0 {
+            I_MAX * scale.min(1.0)
+        } else {
+            0.0
+        };
+        let setpoint = if wanted.is_finite() {
+            wanted.max(-lim).min(lim)
+        } else {
+            0.0
+        };
         let volts = if state == FAULT {
             self.0.reset();
             0.0
@@ -147,5 +158,108 @@ impl CurrentCtl {
             self.0.update(setpoint, measured)
         };
         CurrentOut { volts, setpoint }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEMPS: [f32; 9] = [
+        f32::NEG_INFINITY,
+        25.0,
+        T_RECOVER - 0.1,
+        T_RECOVER + 0.1,
+        T_DERATE + 0.1,
+        T_FAULT,
+        T_FAULT + 0.1,
+        f32::INFINITY,
+        f32::NAN,
+    ];
+
+    /// Every (state, temperature class) pair: fault is absorbing, NaN and over-temperature always fault.
+    #[test]
+    fn thermal_fsm_transition_table() {
+        for from in [NOMINAL, DERATING, FAULT] {
+            for t in TEMPS {
+                let to = ThermalFsm { state: from }.update(t);
+                let want = if from == FAULT || t > T_FAULT || t.is_nan() {
+                    FAULT
+                } else if from == NOMINAL && t > T_DERATE {
+                    DERATING
+                } else if from == DERATING && t < T_RECOVER {
+                    NOMINAL
+                } else {
+                    from
+                };
+                assert_eq!(to, want, "state {from} at {t}");
+            }
+        }
+    }
+
+    #[test]
+    fn setpoint_always_within_thermal_limit() {
+        let odd = [
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            -1e30,
+            -9.0,
+            -0.5,
+            0.0,
+            3.0,
+            9.0,
+            1e30,
+        ];
+        for wanted in odd {
+            for scale in [f32::NAN, -1.0, 0.0, DERATE_SCALE, 1.0, 2.0, f32::INFINITY] {
+                let mut c = CurrentCtl::new().unwrap();
+                let out = c.update(wanted, 0.0, scale, NOMINAL);
+                let lim = if scale >= 0.0 {
+                    I_MAX * scale.min(1.0)
+                } else {
+                    0.0
+                };
+                assert!(
+                    out.setpoint.abs() <= lim,
+                    "wanted {wanted} scale {scale} -> {}",
+                    out.setpoint
+                );
+                if !wanted.is_finite() {
+                    assert_eq!(out.setpoint, 0.0);
+                }
+            }
+        }
+        assert_eq!(
+            CurrentCtl::new()
+                .unwrap()
+                .update(5.0, 0.0, 1.0, FAULT)
+                .volts,
+            0.0
+        );
+    }
+
+    /// The contract `pulse-ir` derives staleness from: fixed latency, dropout runs never longer than declared.
+    #[test]
+    fn sensor_latency_and_dropout_bound() {
+        let mut s = SensorModel::new(25.0);
+        let (mut run, mut longest, mut drops) = (0, 0, 0);
+        for tick in 0..1_000_000u64 {
+            let r = s.sample([tick as f32 * 1e-6, 0.0, 25.0]);
+            if r.valid {
+                run = 0;
+                assert_eq!(r.sampled_at, tick.saturating_sub(LATENCY_TICKS as u64));
+                assert_eq!(r.theta, quantize(r.sampled_at as f32 * 1e-6, POS_QUANT));
+            } else {
+                run += 1;
+                drops += 1;
+                longest = longest.max(run);
+            }
+        }
+        assert_eq!(longest, MAX_DROPOUT_RUN, "bound reached but never exceeded");
+        assert!(
+            (15_000..25_000).contains(&drops),
+            "dropout rate ~{DROPOUT_P}: {drops}"
+        );
     }
 }

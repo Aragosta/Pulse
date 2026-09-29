@@ -21,9 +21,11 @@ Facts are marked **verified** (checked against a source, linked) or **unverified
 
 | Need | For | Status |
 |---|---|---|
-| Serialized, versioned (JSON), stable ids, source spans | frontends, MCP, evidence | **done**: `IR_VERSION` (now 2), serde, `span` |
+| Serialized, versioned (JSON), stable ids, source spans | frontends, MCP, evidence | **done**: `IR_VERSION` (now 3), serde with `deny_unknown_fields`, `span` |
 | Block -> implementation binding (`imp`) and edge payload type (`msg`) | codegen; seed of opaque blocks and typed ports | **done (v2)** |
 | Stable violation codes (`C1-HOLD-MISSING`, ...) | CLI, CI, MCP | **done** |
+| Well-formedness at the trust boundary: version, unique identifier ids, `imp`/`msg` are Rust paths (`Ir::validate`, `IR-*` codes) | every pass; frontends and agents are untrusted | **done (v3)** |
+| Declared delays (`delay_ticks`, Modelica `previous`); every feedback loop needs one (`C1-LOOP`) | Class 1 causality | **done (v3)** |
 | Content hash that WCET results and proofs bind to | Class 1/3 evidence | later |
 | Clocks: rational period + shift; triggered clocks | Class 1 | later (integer Hz today) |
 | WCET: budget + slot for provider bound with provenance | Class 1 (D-001) | budget only |
@@ -97,7 +99,7 @@ Copper's reference bare-metal platform is a **Pimoroni Pico Plus 2 (RP2350B)** w
 - **Stage 3: bound.** Measured per-block worst cycles vs budgets; compare against the static bound once Track A exists.
 
 **Lessons so far**
-- `f32::clamp` panics on a NaN bound and drags in float-formatting code. Use `max`/`min` in generated code. `pulse-joint` now has zero panic references in its emitted assembly.
+- `f32::clamp` panics on a NaN bound and drags in float-formatting code, but bare `max`/`min` is not the fix: `f32::max(NaN, x) == x`, so a NaN setpoint came out as full reverse current and a NaN scale disabled the limit. Generated code guards with comparisons that NaN fails (`if x >= 0.0`, `is_finite`) and maps NaN to the safe value (0 A, `FAULT`).
 - **Check for panics on the final firmware binary, not the library.** rustc treats small functions as cross-crate-inlinable and does not emit them in the library, so a library-level grep can miss them.
 
 ### D-002: Multi-rate on Copper via decimation (Decided, 2026-09-29)
@@ -121,6 +123,11 @@ Python is a compile-time authoring layer only, never linked into the binary (Pyt
 - [ ] WCET provider interface in `pulse-ir` once a real bound exists
 - [x] D-006 step 1: serializable, versioned IR with source spans and stable violation codes
 - [x] Generate `copperconfig.ron` from the IR; drift test replaced by a golden-file test
+- [x] IR well-formedness, declared delays and zero-delay-loop check; NaN-safe controllers; `pulse-joint` tests; stall oracle (16840/37160) as a test
+- [ ] Budget model: 200 Hz tasks run (republish) on every tick, but Class 1 counts them only on firing ticks
+- [ ] Differential test: random IRs, brute-force tick simulation, observed ages/budgets <= what `class1` derives
+- [ ] CI: `cargo test`, clippy, `thumbv8m.main-none-eabihf` build
+- [ ] Align hold vocabulary with Modelica 3.3 synchronous (`subSample`, `hold`, `previous`) and add ModelingToolkit.jl clocks to prior art
 - [ ] Minimal Python frontend that writes the single-joint IR JSON (D-004)
 - [ ] Generate task glue from the IR (needs FSM as data / expression language)
 - [ ] IR: typed ports, FSM as data, expression language (prerequisites for Class 2/3)

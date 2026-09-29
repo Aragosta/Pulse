@@ -7,7 +7,19 @@ pub mod copper;
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any breaking change to the serialized shape.
-pub const IR_VERSION: u32 = 2;
+pub const IR_VERSION: u32 = 3;
+
+#[derive(Debug, PartialEq, Serialize)]
+pub struct Violation {
+    pub check: &'static str,
+    /// Stable, machine-readable id (CLI, CI and MCP key on this, never on `msg`).
+    pub code: &'static str,
+    pub msg: String,
+}
+
+pub(crate) fn v(check: &'static str, code: &'static str, msg: String) -> Violation {
+    Violation { check, code, msg }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Formalism {
@@ -18,6 +30,7 @@ pub enum Formalism {
 
 /// A sensor is not an ideal read of plant state: it has latency, quantization, dropout.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SensorSpec {
     pub latency_ticks: u32,
     pub quant_step: f32,
@@ -27,6 +40,7 @@ pub struct SensorSpec {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Block {
     pub id: String,
     pub formalism: Formalism,
@@ -52,12 +66,17 @@ pub enum Hold {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Edge {
     pub from: String,
     pub to: String,
     pub hold: Option<Hold>,
     /// Declared bound on the age of the value at the consumer; checked against the derived worst case.
     pub max_age_ns: Option<u64>,
+    /// Ticks between the producer writing and the consumer seeing the value (Modelica `previous`). Every feedback
+    /// loop needs at least one edge with a delay, otherwise the loop is an algebraic loop with no evaluation order.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub delay_ticks: u32,
     /// Payload type carried on this edge (e.g. `crate::tasks::SensorSample`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub msg: Option<String>,
@@ -66,6 +85,7 @@ pub struct Edge {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Ir {
     pub version: u32,
     pub base_rate_hz: u32,
@@ -73,8 +93,70 @@ pub struct Ir {
     pub edges: Vec<Edge>,
 }
 
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+fn is_ident(s: &str) -> bool {
+    let mut c = s.chars();
+    c.next()
+        .is_some_and(|f| f.is_ascii_alphabetic() || f == '_')
+        && c.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// `a::b::C`: what `imp` and `msg` must look like, since codegen pastes them into Rust.
+fn is_path(s: &str) -> bool {
+    s.split("::").all(is_ident)
+}
+
 impl Ir {
     pub fn block(&self, id: &str) -> Option<&Block> {
         self.blocks.iter().find(|b| b.id == id)
+    }
+
+    /// Well-formedness every pass relies on: known version, unique identifier ids, Rust-path `imp`/`msg`.
+    /// The IR arrives from frontends and agents, so this is the trust boundary.
+    pub fn validate(&self) -> Vec<Violation> {
+        let mut bad = Vec::new();
+        if self.version != IR_VERSION {
+            bad.push(v(
+                "ir",
+                "IR-VERSION",
+                format!("IR version {}, expected {IR_VERSION}", self.version),
+            ));
+        }
+        for (i, b) in self.blocks.iter().enumerate() {
+            if !is_ident(&b.id) {
+                bad.push(v(
+                    "ir",
+                    "IR-NAME",
+                    format!("block id {:?} is not an identifier", b.id),
+                ));
+            }
+            if self.blocks[..i].iter().any(|o| o.id == b.id) {
+                bad.push(v(
+                    "ir",
+                    "IR-DUP-ID",
+                    format!("block id {:?} declared twice", b.id),
+                ));
+            }
+            if b.imp.as_deref().is_some_and(|p| !is_path(p)) {
+                bad.push(v(
+                    "ir",
+                    "IR-NAME",
+                    format!("{}: imp {:?} is not a Rust path", b.id, b.imp),
+                ));
+            }
+        }
+        for e in &self.edges {
+            if e.msg.as_deref().is_some_and(|p| !is_path(p)) {
+                bad.push(v(
+                    "ir",
+                    "IR-NAME",
+                    format!("{} -> {}: msg {:?} is not a Rust path", e.from, e.to, e.msg),
+                ));
+            }
+        }
+        bad
     }
 }

@@ -57,7 +57,9 @@ impl CuSrcTask for Sensor {
     fn process(&mut self, _ctx: &CuContext, output: &mut Self::Output<'_>) -> CuResult<()> {
         // Sim only: advance the plant one tick with the voltage the actuator last held, then sample it.
         let x = {
-            let mut s = sim::SIM.lock().map_err(cfg_err)?;
+            let mut s = sim::SIM
+                .lock()
+                .map_err(|_| CuError::from("sim state lock poisoned"))?;
             sim::step(&mut s);
             s.x
         };

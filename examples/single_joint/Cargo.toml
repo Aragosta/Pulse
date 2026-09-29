@@ -4,9 +4,6 @@ version = "0.1.0"
 edition = "2024"
 default-run = "single-joint"
 
-
-
-# The main executable of your application
 [[bin]]
 name = "single-joint"
 path = "src/main.rs"
@@ -20,5 +17,5 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 [build-dependencies]
-cu29-build = {  version = "~1.2.1"  }
+cu29-build = { version = "~1.2.1" }
 

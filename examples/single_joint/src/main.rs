@@ -21,6 +21,29 @@ fn verdict(ok: bool) -> &'static str {
     if ok { "PASS" } else { "FAIL" }
 }
 
+/// Run the Copper graph for `ticks` base ticks. `realtime` paces it at `BASE_HZ`; without it the (deterministic)
+/// sim runs as fast as the host allows.
+fn run(ticks: u64, log_path: &str, storage: Option<usize>, realtime: bool) {
+    std::fs::create_dir_all(Path::new(log_path).parent().unwrap()).expect("logs dir");
+    let application = SingleJointApplication::builder()
+        .with_log_path(log_path, storage)
+        .expect("logger")
+        .build()
+        .expect("application");
+    let clock = application.clock();
+    let mut app = application
+        .start()
+        .unwrap_or_else(|e| panic!("start: {}", e.error));
+    let mut limiter = LoopRateLimiter::from_rate_target_hz(BASE_HZ as u64, &clock).expect("rate");
+    for _ in 0..ticks {
+        app.run_one_iteration().expect("iteration");
+        if realtime {
+            limiter.limit(&clock);
+        }
+    }
+    let _ = app.stop();
+}
+
 fn main() {
     let arg = std::env::args().nth(1);
     let ir = ir::single_joint();
@@ -46,33 +69,25 @@ fn main() {
         }
     };
 
-    let logger_path = "logs/single-joint.copper";
-    std::fs::create_dir_all(Path::new(logger_path).parent().unwrap()).expect("logs dir");
-    let application = SingleJointApplication::builder()
-        .with_log_path(logger_path, PREALLOCATED_STORAGE_SIZE)
-        .expect("logger")
-        .build()
-        .expect("application");
-    let clock = application.clock();
-    let mut app = application
-        .start()
-        .unwrap_or_else(|e| panic!("start: {}", e.error));
-    let mut limiter = LoopRateLimiter::from_rate_target_hz(BASE_HZ as u64, &clock).expect("rate");
-
     println!(
         "running {seconds} s of sim at {BASE_HZ} Hz ({} ticks)...",
         seconds * BASE_HZ as u64
     );
-    for _ in 0..seconds * BASE_HZ as u64 {
-        app.run_one_iteration().expect("iteration");
-        limiter.limit(&clock);
-    }
-    let _ = app.stop();
+    run(
+        seconds * BASE_HZ as u64,
+        "logs/single-joint.copper",
+        PREALLOCATED_STORAGE_SIZE,
+        true,
+    );
 
     // ---- report ----
     let mut ok = true;
     let tick_ns = report.tick_ns;
-    let stale = &report.staleness[0];
+    let stale = report
+        .staleness
+        .iter()
+        .find(|s| s.edge == "sensor -> hold_200")
+        .expect("IR declares the decimated sensor path");
     let age_ns = sim::AGE_MAX_TICKS.load(Relaxed) * tick_ns;
 
     println!("\nPulse single-joint: Class 1 (Temporal Determinism)");
@@ -174,5 +189,23 @@ fn main() {
 
     if !ok {
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression oracle for the stall scenario: the sim is deterministic (seeded sensor, fixed-step plant), so the
+    /// thermal transitions land on exact ticks. A change here is a behaviour change: explain it, then update.
+    #[test]
+    fn stall_scenario_transitions_on_known_ticks() {
+        let log = std::env::temp_dir().join("pulse-oracle/single-joint.copper");
+        run(38_000, log.to_str().unwrap(), Some(64 * 1024 * 1024), false);
+        let first = |s: usize| sim::STATE_FIRST_TICK[s].load(Relaxed);
+        assert_eq!((first(1), first(2)), (16_840, 37_160));
+        assert!(
+            sim::DERATE_SETPOINT_MAX_MA.load(Relaxed) as f32 <= DERATE_SCALE * I_MAX * 1000.0 + 1.0
+        );
     }
 }

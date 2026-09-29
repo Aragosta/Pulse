@@ -1,15 +1,8 @@
 //! Class 1: Temporal Determinism, computed from the IR alone (no execution).
 
-use crate::{Hold, Ir};
+pub use crate::Violation;
+use crate::{Hold, Ir, v};
 use serde::Serialize;
-
-#[derive(Debug, PartialEq, Serialize)]
-pub struct Violation {
-    pub check: &'static str,
-    /// Stable, machine-readable id (CLI, CI and MCP key on this, never on `msg`).
-    pub code: &'static str,
-    pub msg: String,
-}
 
 #[derive(Debug, Serialize)]
 pub struct Staleness {
@@ -32,14 +25,21 @@ fn gcd(a: u32, b: u32) -> u32 {
     if b == 0 { a } else { gcd(b, a % b) }
 }
 
-fn v(check: &'static str, code: &'static str, msg: String) -> Violation {
-    Violation { check, code, msg }
-}
-
 pub fn check(ir: &Ir) -> Result<Report, Vec<Violation>> {
-    let mut bad = Vec::new();
-    if ir.base_rate_hz == 0 {
-        return Err(vec![v("rate-ratio", "C1-RATE", "base rate is 0".into())]);
+    let mut bad = ir.validate();
+    if !bad.is_empty() {
+        return Err(bad);
+    }
+    // Integer ns ticks: a rounded-down tick would make every derived age bound optimistic.
+    if ir.base_rate_hz == 0 || !1_000_000_000u32.is_multiple_of(ir.base_rate_hz) {
+        return Err(vec![v(
+            "rate-ratio",
+            "C1-RATE",
+            format!(
+                "base rate {} Hz is not a whole number of ns per tick",
+                ir.base_rate_hz
+            ),
+        )]);
     }
     let tick_ns = 1_000_000_000 / ir.base_rate_hz as u64;
 
@@ -132,7 +132,43 @@ pub fn check(ir: &Ir) -> Result<Report, Vec<Violation>> {
         }
     }
 
-    // 4. Tick budget: Copper runs the whole graph sequentially in one base-rate slot, so on the busiest tick
+    // 4. Causality: every feedback loop crosses at least one delayed edge, so each tick has an evaluation order.
+    //    Kahn's algorithm on the zero-delay edges; whatever cannot be ordered sits on a zero-delay cycle.
+    let idx = |id: &str| ir.blocks.iter().position(|b| b.id == id);
+    let fast: Vec<(usize, usize)> = ir
+        .edges
+        .iter()
+        .filter(|e| e.delay_ticks == 0)
+        .filter_map(|e| Some((idx(&e.from)?, idx(&e.to)?)))
+        .collect();
+    let mut indeg = vec![0; ir.blocks.len()];
+    for &(_, t) in &fast {
+        indeg[t] += 1;
+    }
+    let mut ready: Vec<usize> = (0..indeg.len()).filter(|&i| indeg[i] == 0).collect();
+    while let Some(n) = ready.pop() {
+        for &(f, t) in &fast {
+            if f == n {
+                indeg[t] -= 1;
+                if indeg[t] == 0 {
+                    ready.push(t);
+                }
+            }
+        }
+    }
+    let stuck: Vec<&str> = (0..indeg.len())
+        .filter(|&i| indeg[i] > 0)
+        .map(|i| ir.blocks[i].id.as_str())
+        .collect();
+    if !stuck.is_empty() {
+        bad.push(v(
+            "causality",
+            "C1-LOOP",
+            format!("zero-delay feedback loop through {}", stuck.join(", ")),
+        ));
+    }
+
+    // 5. Tick budget: Copper runs the whole graph sequentially in one base-rate slot, so on the busiest tick
     //    the sum of WCET budgets of every block firing on it must fit inside one tick.
     let (mut worst_tick, mut worst_sum) = (0, 0);
     if bad.is_empty() {
@@ -194,6 +230,7 @@ mod tests {
             to: to.into(),
             hold,
             max_age_ns: None,
+            delay_ticks: 0,
             msg: None,
             span: None,
         }
@@ -217,8 +254,11 @@ mod tests {
             ],
         }
     }
+    /// The one violation `ir` produces (fails if there are zero or several).
     fn only(ir: &Ir) -> &'static str {
-        check(ir).unwrap_err()[0].code
+        let e = check(ir).unwrap_err();
+        assert_eq!(e.len(), 1, "{e:?}");
+        e[0].code
     }
 
     #[test]
@@ -244,8 +284,8 @@ mod tests {
     #[test]
     fn irrational_rate_rejected() {
         let mut ir = good();
-        ir.blocks[1].rate_hz = 7000;
-        assert_eq!(only(&ir), "C1-RATE");
+        ir.blocks[1].rate_hz = 7000; // also breaks the holds on its edges; the rate error is reported first
+        assert_eq!(check(&ir).unwrap_err()[0].code, "C1-RATE");
     }
     #[test]
     fn wrong_decimation_factor_rejected() {
@@ -263,14 +303,66 @@ mod tests {
     fn over_budget_tick_rejected() {
         let mut ir = good();
         ir.blocks[1].wcet_budget_ns = 100_000; // only the tick both fast+slow fire on is over: 20+100+10 > 125
-        let e = check(&ir).unwrap_err();
-        assert_eq!(e[0].code, "C1-BUDGET");
-        assert!(e[0].msg.starts_with("tick 0:"));
+        assert_eq!(only(&ir), "C1-BUDGET");
+        assert!(check(&ir).unwrap_err()[0].msg.starts_with("tick 0:"));
     }
     #[test]
     fn stale_read_rejected() {
         let mut ir = good();
         ir.edges[0].max_age_ns = Some(1_000_000); // 1 ms << derived 5.75 ms
         assert_eq!(only(&ir), "C1-STALE");
+    }
+    #[test]
+    fn unknown_block_rejected() {
+        let mut ir = good();
+        ir.edges[2].to = "nowhere".into();
+        assert_eq!(only(&ir), "C1-EDGE");
+    }
+    #[test]
+    fn hold_on_same_rate_edge_rejected() {
+        let mut ir = good();
+        ir.edges[2].hold = Some(Hold::Zoh);
+        assert_eq!(only(&ir), "C1-HOLD-SAME");
+    }
+    #[test]
+    fn base_rate_must_give_whole_ns_ticks() {
+        let mut ir = good();
+        ir.base_rate_hz = 0;
+        assert_eq!(only(&ir), "C1-RATE");
+        ir.base_rate_hz = 3000; // 333_333.3 ns
+        assert_eq!(only(&ir), "C1-RATE");
+    }
+    #[test]
+    fn zero_delay_loop_rejected_delayed_loop_accepted() {
+        let mut ir = good();
+        ir.edges.push(edge("sink", "fast", None));
+        assert_eq!(only(&ir), "C1-LOOP");
+        ir.edges[3].delay_ticks = 1;
+        check(&ir).unwrap();
+    }
+    #[test]
+    fn malformed_ir_rejected_before_any_timing_check() {
+        let mut ir = good();
+        ir.version = 1;
+        assert_eq!(only(&ir), "IR-VERSION");
+        let mut ir = good();
+        ir.blocks[2].id = "fast".into();
+        assert!(
+            check(&ir)
+                .unwrap_err()
+                .iter()
+                .any(|v| v.code == "IR-DUP-ID")
+        );
+        let mut ir = good();
+        ir.blocks[0].imp = Some("t::A\"), (id: \"x".into()); // would inject into copperconfig.ron
+        assert_eq!(only(&ir), "IR-NAME");
+    }
+    #[test]
+    fn unknown_json_field_rejected() {
+        // A typo must not silently drop a safety bound.
+        let json = serde_json::to_string(&good())
+            .unwrap()
+            .replace("max_age_ns", "max_age_n");
+        assert!(serde_json::from_str::<Ir>(&json).is_err());
     }
 }

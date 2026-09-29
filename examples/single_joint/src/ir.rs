@@ -30,6 +30,7 @@ pub fn single_joint() -> Ir {
         to: to.into(),
         hold,
         max_age_ns: None,
+        delay_ticks: 0,
         msg: msg.map(|m| format!("crate::tasks::{m}")),
         span: None,
     };
@@ -83,7 +84,11 @@ pub fn single_joint() -> Ir {
                 Some("ThermalLimit"),
             ),
             e("current_loop", "actuator", None, Some("VoltageCmd")),
-            e("actuator", PLANT, None, None),
+            // The plant integrates the voltage held from the previous tick: the loop's one declared delay.
+            Edge {
+                delay_ticks: 1,
+                ..e("actuator", PLANT, None, None)
+            },
         ],
     }
 }
@@ -121,6 +126,7 @@ mod tests {
             to: "position_loop".into(),
             hold: None,
             max_age_ns: None,
+            delay_ticks: 0,
             msg: None,
             span: None,
         });
@@ -130,6 +136,14 @@ mod tests {
                 |v| v.code == "C1-HOLD-MISSING" && v.msg.starts_with("sensor -> position_loop")
             )
         );
+    }
+
+    #[test]
+    fn undeclared_actuation_delay_is_refused() {
+        let mut ir = single_joint();
+        ir.edges.last_mut().unwrap().delay_ticks = 0;
+        let errs = pulse_ir::class1::check(&ir).unwrap_err();
+        assert_eq!(errs[0].code, "C1-LOOP", "{errs:?}");
     }
 
     #[test]

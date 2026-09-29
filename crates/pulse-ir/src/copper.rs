@@ -4,6 +4,9 @@ use crate::Ir;
 use std::fmt::Write;
 
 pub fn emit(ir: &Ir) -> Result<String, String> {
+    if let Some(bad) = ir.validate().first() {
+        return Err(bad.msg.clone());
+    }
     let is_task = |id: &str| ir.block(id).is_some_and(|b| b.imp.is_some());
     let mut s = String::from("// GENERATED from the Pulse IR. Do not edit.\n(\n    tasks: [\n");
     for b in &ir.blocks {
@@ -62,6 +65,7 @@ mod tests {
             to: to.into(),
             hold: None,
             max_age_ns: None,
+            delay_ticks: 0,
             msg: msg.map(Into::into),
             span: None,
         }
