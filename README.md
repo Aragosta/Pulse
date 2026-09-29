@@ -1,6 +1,42 @@
 # Pulse — Core Design & Validation
 29 sep 2026 · @Enzo
 
+## Engine layers
+
+The IR in the middle is the only contract: everything above writes it, everything below reads it. Nothing downstream is hand-edited once it can be generated.
+
+```mermaid
+flowchart TB
+    L1["<b>1 · Frontends</b><br/>✅ hand-written Rust IR · ⬜ Python · ⬜ Modelica via Rumoca · ⬜ FMI import"]:::partial
+    L2["<b>2 · Pulse IR</b> · crates/pulse-ir<br/>✅ blocks, rates, holds, delays, sensors, budgets, JSON v3, validate()<br/>⬜ typed ports · FSMs as data · expression language · rational clocks"]:::partial
+    L3["<b>3 · Checks</b><br/>🟡 Class 1 temporal · ⬜ Class 2 structural · ⬜ Class 3 symbolic"]:::partial
+    L4["<b>4 · WCET provider</b><br/>⬜ static bound per block, with provenance"]:::todo
+    L5["<b>5 · Codegen</b><br/>✅ copperconfig.ron · 🟡 task glue, hand-written · ⬜ physics code"]:::partial
+    L6["<b>6 · Block library</b> · crates/pulse-joint<br/>✅ no_std controllers, sensor model, thermal FSM"]:::partial
+    L7["<b>7 · Runtime targets</b><br/>✅ host + simulated plant · ⬜ RP2350 · ⬜ Cortex-M4F"]:::partial
+    L8["<b>8 · Interfaces</b><br/>🟡 CLI report · ⬜ MCP server"]:::partial
+    L9["<b>9 · Policy blocks + runtime assurance</b><br/>⬜ black-box policy, monitor, fallback"]:::todo
+
+    L1 --> L2 --> L3 --> L4 --> L5 --> L6 --> L7 --> L8 --> L9
+
+    classDef partial fill:#fff3bf,stroke:#e67700,color:#5c3d00
+    classDef todo fill:#f1f3f5,stroke:#868e96,color:#343a40,stroke-dasharray:4 3
+```
+
+✅ have · 🟡 partly there · ⬜ to build. Yellow layer: started · grey dashed layer: not started. Read top to bottom: each layer builds on the ones above it.
+
+| # | Layer | What it does | Have | Build next |
+|---|---|---|---|---|
+| 1 | **Frontends** | Let people describe a system in the language they already use (Python, Modelica, FMUs) and emit the IR. Authoring only: never linked into the binary. | The single-joint IR written by hand in Rust. | A minimal Python frontend that writes the single-joint JSON (D-004). Then Rumoca for physics. |
+| 2 | **Pulse IR** | The single source of truth: every block with its formalism, rate, timing budget and implementation, and every edge with its hold, delay, age bound and payload type. Versioned and serializable, and validated on load because frontends and agents are untrusted. | Blocks, rates, `Decimate`/`Zoh` holds, `delay_ticks`, sensor contracts, WCET budgets, JSON v3, `validate()`. | Typed ports (dtype, unit, range), FSMs as data, a small total expression language, rational clocks, and a content hash that evidence binds to. |
+| 3 | **Checks** | Prove properties from the IR without running it; a failure is a compile error that names the block or edge. Class 1: timing. Class 2: partitioning a continuous system didn't change it. Class 3: algebraic proofs over the whole parameter range. | Class 1: rate ratios and hyperperiod, a declared hold on every cross-rate read, staleness bound, no zero-delay loops, busiest-tick budget. | Fix the budget model (slow tasks run on every tick), then a differential test of Class 1 against a brute-force tick simulation. Class 2/3 only after that. |
+| 4 | **WCET provider** | Supply a real worst-case execution time per block, from the exact shipped binary and a hardware model, so "WCET ≤ budget" is proved rather than assumed. Pluggable: aiT, OTAWA, or measured (clearly labelled not a proof). | Only the budgets; host timings are indicative. | The provider interface in `pulse-ir` once the first real bound exists (D-001). |
+| 5 | **Codegen** | Turn the IR into what the runtime executes: the task graph, the glue that wires each block to its implementation, and the plant/physics code. | `copperconfig.ron` generated, with a golden-file test. | Generate `tasks.rs` from the IR (needs FSMs as data). Physics code comes from Rumoca. |
+| 6 | **Block library** | The `no_std`, allocation-free, panic-free implementations the tasks call, so the same code runs in simulation and on the chip. | `pulse-joint`: sensor model, position/current controllers, thermal FSM, fail-safe on NaN, with tests. | Make it generic over the number type, so Class 3 can run the same code on intervals or dual numbers. |
+| 7 | **Runtime targets** | Execute the graph deterministically at the base rate. Host for development; bare-metal targets for real timing. | Copper on host with an RK4 plant; the stall scenario is a regression test. | RP2350 with cycle-counter probes (D-005 Stage 2). A Cortex-M4F board for static WCET (D-001 Track A). |
+| 8 | **Interfaces** | How people, CI and agents use the engine: reports with stable violation codes, and an MCP server so agents can propose edits that pass the same checks. | The `single-joint` binary report and `--ir-json`. | A standalone CLI (`pulse check model.json`), a JSON Schema for the IR, then the MCP server (D-006). |
+| 9 | **Policy blocks + runtime assurance** | Put learned policies in the loop as black boxes with a timing and interface contract, watched by a verified monitor that falls back to a checked controller. | Nothing yet. | Last, per "Next" below: it depends on every layer above being trustworthy. |
+
 Pulse is one engine that composes continuous dynamics, discrete events, and state machines at multiple rates into a single intermediate representation, compiled to a deterministic binary. A real cyber-physical system — concretely, a robot — is never one formalism: a joint's electromagnetics and thermal state evolve continuously, a safety supervisor transitions discretely, and a scheduler dispatches work across seven different rates. Increasingly a learned policy sits in that loop too, with variable inference time and no formal guarantees.
 
 The engine's job is to make the interactions between those layers checkable at compile time — an inference overrun, a sensor read at the wrong phase, a torque command that's thermally infeasible — instead of discovered on hardware. That's also why validation below relies on deterministic mathematical evidence rather than unit tests: a unit test confirms one input produced one correct output; it can't confirm a deadline always holds, or that a control law is stable everywhere it's allowed to operate.
