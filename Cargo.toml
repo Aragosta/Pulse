@@ -1,0 +1,9 @@
+[workspace]
+resolver = "3"
+members = ["crates/pulse-ir", "examples/single_joint"]
+
+[profile.debug-optimized]
+inherits = "dev"
+opt-level = 3
+debug = 2
+debug-assertions = true

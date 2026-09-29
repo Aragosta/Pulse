@@ -1,0 +1,24 @@
+(
+    tasks: [
+        (id: "sensor", type: "tasks::Sensor"),
+        (id: "hold_200", type: "tasks::Hold200"),
+        (id: "position_loop", type: "tasks::PositionLoop"),
+        (id: "thermal_fsm", type: "tasks::ThermalFsm"),
+        (id: "current_loop", type: "tasks::CurrentLoop"),
+        (id: "actuator", type: "tasks::Actuator"),
+    ],
+    cnx: [
+        // Fast path: full rate, straight into the inner loop.
+        (src: "sensor", dst: "current_loop", msg: "crate::tasks::SensorSample"),
+        // Slow path: decimated 8 kHz -> 200 Hz sample-and-hold.
+        (src: "sensor", dst: "hold_200", msg: "crate::tasks::SensorSample"),
+        (src: "hold_200", dst: "position_loop", msg: "crate::tasks::HeldSample"),
+        (src: "hold_200", dst: "thermal_fsm", msg: "crate::tasks::HeldSample"),
+        // Slow -> fast: producers hold their last output between 200 Hz activations (zero-order hold).
+        (src: "position_loop", dst: "current_loop", msg: "crate::tasks::CurrentRef"),
+        (src: "thermal_fsm", dst: "current_loop", msg: "crate::tasks::ThermalLimit"),
+        (src: "current_loop", dst: "actuator", msg: "crate::tasks::VoltageCmd"),
+    ],
+    // One base tick per iteration. Copper has a single loop rate; 200 Hz is expressed as 40:1 decimation in the tasks.
+    runtime: (rate_target_hz: 8000),
+)

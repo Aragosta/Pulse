@@ -1,0 +1,25 @@
+[package]
+name = "single_joint"
+version = "0.1.0"
+edition = "2024"
+default-run = "single-joint"
+
+
+
+# The main executable of your application
+[[bin]]
+name = "single-joint"
+path = "src/main.rs"
+
+[dependencies]
+cu29 = { version = "~1.2.1", features = ["high-precision-limiter"] }
+pulse-ir = { path = "../../crates/pulse-ir" }
+multicalc = "0.10"
+bincode = { package = "cu-bincode", version = "2.1", default-features = false, features = ["derive", "alloc"] }
+serde = { version = "1.0", features = ["derive"] }
+
+[build-dependencies]
+cu29-build = {  version = "~1.2.1"  }
+
+[dev-dependencies]
+ron = "0.10"
