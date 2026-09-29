@@ -1,21 +1,24 @@
 //! Class 1: Temporal Determinism, computed from the IR alone (no execution).
 
 use crate::{Hold, Ir};
+use serde::Serialize;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize)]
 pub struct Violation {
     pub check: &'static str,
+    /// Stable, machine-readable id (CLI, CI and MCP key on this, never on `msg`).
+    pub code: &'static str,
     pub msg: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct Staleness {
     pub edge: String,
     pub worst_age_ns: u64,
     pub declared_max_ns: Option<u64>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct Report {
     pub tick_ns: u64,
     pub hyperperiod_ticks: u32,
@@ -29,14 +32,14 @@ fn gcd(a: u32, b: u32) -> u32 {
     if b == 0 { a } else { gcd(b, a % b) }
 }
 
-fn v(check: &'static str, msg: String) -> Violation {
-    Violation { check, msg }
+fn v(check: &'static str, code: &'static str, msg: String) -> Violation {
+    Violation { check, code, msg }
 }
 
 pub fn check(ir: &Ir) -> Result<Report, Vec<Violation>> {
     let mut bad = Vec::new();
     if ir.base_rate_hz == 0 {
-        return Err(vec![v("rate-ratio", "base rate is 0".into())]);
+        return Err(vec![v("rate-ratio", "C1-RATE", "base rate is 0".into())]);
     }
     let tick_ns = 1_000_000_000 / ir.base_rate_hz as u64;
 
@@ -46,6 +49,7 @@ pub fn check(ir: &Ir) -> Result<Report, Vec<Violation>> {
         if hz == 0 || !ir.base_rate_hz.is_multiple_of(hz) {
             bad.push(v(
                 "rate-ratio",
+                "C1-RATE",
                 format!(
                     "{id}: {hz} Hz does not divide base rate {} Hz",
                     ir.base_rate_hz
@@ -60,25 +64,27 @@ pub fn check(ir: &Ir) -> Result<Report, Vec<Violation>> {
     let periods: Vec<(&str, Option<u32>)> = ir
         .blocks
         .iter()
-        .map(|b| (b.id, period_ticks(b.id, b.rate_hz)))
+        .map(|b| (b.id.as_str(), period_ticks(&b.id, b.rate_hz)))
         .collect();
 
     // 2. Every cross-rate edge carries a declared, direction- and factor-correct hold.
     let mut staleness = Vec::new();
     for e in &ir.edges {
         let name = format!("{} -> {}", e.from, e.to);
-        let (Some(f), Some(t)) = (ir.block(e.from), ir.block(e.to)) else {
-            bad.push(v("edge", format!("{name}: unknown block")));
+        let (Some(f), Some(t)) = (ir.block(&e.from), ir.block(&e.to)) else {
+            bad.push(v("edge", "C1-EDGE", format!("{name}: unknown block")));
             continue;
         };
         match (f.rate_hz.cmp(&t.rate_hz), e.hold) {
             (std::cmp::Ordering::Equal, None) => {}
             (std::cmp::Ordering::Equal, Some(_)) => bad.push(v(
                 "sample-hold",
+                "C1-HOLD-SAME",
                 format!("{name}: hold declared on a same-rate edge"),
             )),
             (_, None) => bad.push(v(
                 "sample-hold",
+                "C1-HOLD-MISSING",
                 format!(
                     "{name}: {} Hz -> {} Hz read with no declared sample/hold",
                     f.rate_hz, t.rate_hz
@@ -88,6 +94,7 @@ pub fn check(ir: &Ir) -> Result<Report, Vec<Violation>> {
                 if f.rate_hz % t.rate_hz != 0 || n != f.rate_hz / t.rate_hz {
                     bad.push(v(
                         "sample-hold",
+                        "C1-HOLD-FACTOR",
                         format!(
                             "{name}: Decimate({n}) but rate ratio is {}/{}",
                             f.rate_hz, t.rate_hz
@@ -100,6 +107,7 @@ pub fn check(ir: &Ir) -> Result<Report, Vec<Violation>> {
                 if e.max_age_ns.is_some_and(|m| worst > m) {
                     bad.push(v(
                         "staleness",
+                        "C1-STALE",
                         format!(
                             "{name}: worst-case age {worst} ns exceeds declared {} ns",
                             e.max_age_ns.unwrap()
@@ -115,6 +123,7 @@ pub fn check(ir: &Ir) -> Result<Report, Vec<Violation>> {
             (std::cmp::Ordering::Less, Some(Hold::Zoh)) => {}
             (_, Some(h)) => bad.push(v(
                 "sample-hold",
+                "C1-HOLD-DIR",
                 format!(
                     "{name}: {h:?} is the wrong direction for {} Hz -> {} Hz",
                     f.rate_hz, t.rate_hz
@@ -142,6 +151,7 @@ pub fn check(ir: &Ir) -> Result<Report, Vec<Violation>> {
         if worst_sum > tick_ns {
             bad.push(v(
                 "wcet-budget",
+                "C1-BUDGET",
                 format!(
                     "tick {worst_tick}: budgets sum to {worst_sum} ns > tick period {tick_ns} ns"
                 ),
@@ -167,21 +177,25 @@ mod tests {
     use super::*;
     use crate::*;
 
-    fn blk(id: &'static str, rate_hz: u32, wcet: u64) -> Block {
+    fn blk(id: &str, rate_hz: u32, wcet: u64) -> Block {
         Block {
-            id,
+            id: id.into(),
             formalism: Formalism::Discrete,
             rate_hz,
             wcet_budget_ns: wcet,
             sensor: None,
+            imp: None,
+            span: None,
         }
     }
-    fn edge(from: &'static str, to: &'static str, hold: Option<Hold>) -> Edge {
+    fn edge(from: &str, to: &str, hold: Option<Hold>) -> Edge {
         Edge {
-            from,
-            to,
+            from: from.into(),
+            to: to.into(),
             hold,
             max_age_ns: None,
+            msg: None,
+            span: None,
         }
     }
     fn good() -> Ir {
@@ -193,6 +207,7 @@ mod tests {
             max_dropout_run: 3,
         });
         Ir {
+            version: IR_VERSION,
             base_rate_hz: 8000,
             blocks: vec![fast, blk("slow", 200, 30_000), blk("sink", 8000, 10_000)],
             edges: vec![
@@ -203,7 +218,7 @@ mod tests {
         }
     }
     fn only(ir: &Ir) -> &'static str {
-        check(ir).unwrap_err()[0].check
+        check(ir).unwrap_err()[0].code
     }
 
     #[test]
@@ -224,38 +239,38 @@ mod tests {
     fn unheld_cross_rate_edge_rejected() {
         let mut ir = good();
         ir.edges[0].hold = None;
-        assert_eq!(only(&ir), "sample-hold");
+        assert_eq!(only(&ir), "C1-HOLD-MISSING");
     }
     #[test]
     fn irrational_rate_rejected() {
         let mut ir = good();
         ir.blocks[1].rate_hz = 7000;
-        assert_eq!(only(&ir), "rate-ratio");
+        assert_eq!(only(&ir), "C1-RATE");
     }
     #[test]
     fn wrong_decimation_factor_rejected() {
         let mut ir = good();
         ir.edges[0].hold = Some(Hold::Decimate(39));
-        assert_eq!(only(&ir), "sample-hold");
+        assert_eq!(only(&ir), "C1-HOLD-FACTOR");
     }
     #[test]
     fn wrong_hold_direction_rejected() {
         let mut ir = good();
         ir.edges[1].hold = Some(Hold::Decimate(40));
-        assert_eq!(only(&ir), "sample-hold");
+        assert_eq!(only(&ir), "C1-HOLD-DIR");
     }
     #[test]
     fn over_budget_tick_rejected() {
         let mut ir = good();
         ir.blocks[1].wcet_budget_ns = 100_000; // only the tick both fast+slow fire on is over: 20+100+10 > 125
         let e = check(&ir).unwrap_err();
-        assert_eq!(e[0].check, "wcet-budget");
+        assert_eq!(e[0].code, "C1-BUDGET");
         assert!(e[0].msg.starts_with("tick 0:"));
     }
     #[test]
     fn stale_read_rejected() {
         let mut ir = good();
         ir.edges[0].max_age_ns = Some(1_000_000); // 1 ms << derived 5.75 ms
-        assert_eq!(only(&ir), "staleness");
+        assert_eq!(only(&ir), "C1-STALE");
     }
 }

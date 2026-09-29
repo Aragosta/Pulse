@@ -45,12 +45,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "base64"
-version = "0.22.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
-
-[[package]]
 name = "bitfield"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -414,7 +408,7 @@ dependencies = [
  "petgraph",
  "portable-atomic",
  "rayon",
- "ron 0.12.2",
+ "ron",
  "serde",
  "serde_derive",
  "serde_json",
@@ -928,6 +922,16 @@ dependencies = [
 [[package]]
 name = "pulse-ir"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "pulse-joint"
+version = "0.1.0"
+dependencies = [
+ "multicalc",
+]
 
 [[package]]
 name = "quote"
@@ -965,19 +969,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
  "bitflags",
-]
-
-[[package]]
-name = "ron"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "beceb6f7bf81c73e73aeef6dd1356d9a1b2b4909e1f0fc3e59b034f9572d7b7f"
-dependencies = [
- "base64",
- "bitflags",
- "serde",
- "serde_derive",
- "unicode-ident",
 ]
 
 [[package]]
@@ -1102,10 +1093,10 @@ dependencies = [
  "cu-bincode",
  "cu29",
  "cu29-build",
- "multicalc",
  "pulse-ir",
- "ron 0.10.1",
+ "pulse-joint",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

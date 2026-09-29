@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/pulse-ir", "examples/single_joint"]
+members = ["crates/pulse-ir", "crates/pulse-joint", "examples/single_joint"]
 
 [profile.debug-optimized]
 inherits = "dev"

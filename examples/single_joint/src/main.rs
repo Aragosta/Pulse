@@ -22,11 +22,17 @@ fn verdict(ok: bool) -> &'static str {
 }
 
 fn main() {
-    let seconds: u64 = std::env::args()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(12);
+    let arg = std::env::args().nth(1);
     let ir = ir::single_joint();
+    if arg.as_deref() == Some("--ir-json") {
+        // The file a frontend (Python, Modelica) will produce.
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&ir).expect("IR serializes")
+        );
+        return;
+    }
+    let seconds: u64 = arg.and_then(|s| s.parse().ok()).unwrap_or(12);
 
     // Class 1, static: refuse to run a graph that cannot be proven temporally deterministic.
     let report = match pulse_ir::class1::check(&ir) {
@@ -34,7 +40,7 @@ fn main() {
         Err(violations) => {
             eprintln!("Class 1 (Temporal Determinism): REFUSING TO RUN");
             for v in violations {
-                eprintln!("  [FAIL] {}: {}", v.check, v.msg);
+                eprintln!("  [FAIL] {} ({}): {}", v.check, v.code, v.msg);
             }
             std::process::exit(1);
         }
@@ -93,7 +99,7 @@ fn main() {
         tick_ns as f64 / 1e3
     );
     println!(
-        "  [ -- ] WCET <= budget    NOT PROVEN: no static WCET bound yet (LLVMTA spike), observed only below"
+        "  [ -- ] WCET <= budget    NOT PROVEN: no static WCET bound yet (see NOTES.md D-001), observed only below"
     );
 
     println!("\nMEASURED on host (observed, not a proof)");

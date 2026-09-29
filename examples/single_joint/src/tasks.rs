@@ -6,9 +6,8 @@ use crate::sim::{self, timed};
 use bincode::{Decode, Encode};
 use core::sync::atomic::Ordering::Relaxed;
 use cu29::prelude::*;
-use multicalc::control::Pid;
-use multicalc::prelude::*;
-use multicalc::random::Pcg32;
+use pulse_joint::{CurrentCtl, PositionCtl, SensorModel, ThermalFsm};
+pub use pulse_joint::{DERATING, FAULT, NOMINAL};
 use serde::{Deserialize, Serialize};
 
 macro_rules! payload {
@@ -27,15 +26,8 @@ payload! {
     VoltageCmd { volts: f32 }
 }
 
-pub const NOMINAL: u8 = 0;
-pub const DERATING: u8 = 1;
-pub const FAULT: u8 = 2;
-
 fn critical(tick: u64) -> bool {
     tick.is_multiple_of(DECIMATION) // the tick on which every rate fires
-}
-fn quantize(x: f32, step: f32) -> f32 {
-    (x / step).round() * step
 }
 fn cfg_err<E>(_: E) -> CuError {
     CuError::from("invalid controller configuration")
@@ -43,16 +35,11 @@ fn cfg_err<E>(_: E) -> CuError {
 
 // ---- sensor (8 kHz source): latency ring, quantization, bounded dropout -------------------------------------------
 
-const RING: usize = LATENCY_TICKS as usize + 1;
-
 #[derive(Reflect)]
 pub struct Sensor {
     tick: u64,
-    ring: [[f32; 3]; RING],
     #[reflect(ignore)]
-    rng: Pcg32<f32>,
-    dropout_run: u32,
-    last: SensorSample,
+    model: SensorModel,
 }
 impl Freezable for Sensor {}
 
@@ -63,10 +50,7 @@ impl CuSrcTask for Sensor {
     fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self> {
         Ok(Self {
             tick: 0,
-            ring: [[0.0, 0.0, T_AMB as f32]; RING],
-            rng: Pcg32::new(0xC0FFEE),
-            dropout_run: 0,
-            last: SensorSample::default(),
+            model: SensorModel::new(T_AMB as f32),
         })
     }
 
@@ -79,23 +63,14 @@ impl CuSrcTask for Sensor {
         };
         sim::tick_start();
         timed(sim::SENSOR, critical(self.tick), || {
-            self.ring[self.tick as usize % RING] = [x[2] as f32, x[0] as f32, x[3] as f32];
-            let delayed = self.ring[(self.tick as usize + 1) % RING]; // LATENCY_TICKS ticks old
-            let drop = self.dropout_run < MAX_DROPOUT_RUN && self.rng.next_unit() < DROPOUT_P;
-            if drop {
-                self.dropout_run += 1;
-                self.last.valid = false;
-            } else {
-                self.dropout_run = 0;
-                self.last = SensorSample {
-                    theta: quantize(delayed[0], POS_QUANT),
-                    current: quantize(delayed[1], CUR_QUANT),
-                    temp: quantize(delayed[2], TEMP_QUANT),
-                    sampled_at: self.tick.saturating_sub(LATENCY_TICKS as u64),
-                    valid: true,
-                };
-            }
-            output.set_payload(self.last);
+            let r = self.model.sample([x[2] as f32, x[0] as f32, x[3] as f32]);
+            output.set_payload(SensorSample {
+                theta: r.theta,
+                current: r.current,
+                temp: r.temp,
+                sampled_at: r.sampled_at,
+                valid: r.valid,
+            });
         });
         self.tick += 1;
         Ok(())
@@ -151,7 +126,7 @@ impl CuTask for Hold200 {
 pub struct PositionLoop {
     tick: u64,
     #[reflect(ignore)]
-    pid: Pid<f32>,
+    ctl: PositionCtl,
     amps: f32,
 }
 impl Freezable for PositionLoop {}
@@ -162,13 +137,9 @@ impl CuTask for PositionLoop {
     type Output<'m> = output_msg!(CurrentRef);
 
     fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self> {
-        let pid = Pid::new(POS_KP, POS_KI, POS_KD, OUTER_DT)
-            .map_err(cfg_err)?
-            .with_output_limits(-I_MAX, I_MAX)
-            .map_err(cfg_err)?;
         Ok(Self {
             tick: 0,
-            pid,
+            ctl: PositionCtl::new().map_err(cfg_err)?,
             amps: 0.0,
         })
     }
@@ -182,7 +153,7 @@ impl CuTask for PositionLoop {
         timed(sim::POS, critical(self.tick), || {
             if let Some(h) = input.payload().filter(|h| h.fresh) {
                 sim::AGE_MAX_TICKS.fetch_max(h.tick - h.sample.sampled_at, Relaxed);
-                self.amps = self.pid.update(THETA_REF, h.sample.theta);
+                self.amps = self.ctl.update(THETA_REF, h.sample.theta);
             }
             output.set_payload(CurrentRef { amps: self.amps }); // held between activations
         });
@@ -194,13 +165,14 @@ impl CuTask for PositionLoop {
 // ---- thermal_fsm (200 Hz): nominal -> derating -> fault (latched) -------------------------------------------------------
 
 #[derive(Reflect)]
-pub struct ThermalFsm {
+pub struct ThermalFsmTask {
     tick: u64,
-    state: u8,
+    #[reflect(ignore)]
+    fsm: ThermalFsm,
 }
-impl Freezable for ThermalFsm {}
+impl Freezable for ThermalFsmTask {}
 
-impl CuTask for ThermalFsm {
+impl CuTask for ThermalFsmTask {
     type Resources<'r> = ();
     type Input<'m> = input_msg!(HeldSample);
     type Output<'m> = output_msg!(ThermalLimit);
@@ -208,7 +180,7 @@ impl CuTask for ThermalFsm {
     fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self> {
         Ok(Self {
             tick: 0,
-            state: NOMINAL,
+            fsm: ThermalFsm::new(),
         })
     }
 
@@ -220,20 +192,13 @@ impl CuTask for ThermalFsm {
     ) -> CuResult<()> {
         timed(sim::FSM, critical(self.tick), || {
             if let Some(h) = input.payload().filter(|h| h.fresh) {
-                let t = h.sample.temp;
-                self.state = match self.state {
-                    _ if t > T_FAULT => FAULT,
-                    FAULT => FAULT,
-                    NOMINAL if t > T_DERATE => DERATING,
-                    DERATING if t < T_RECOVER => NOMINAL,
-                    s => s,
-                };
-                sim::STATE_FIRST_TICK[self.state as usize].fetch_min(h.tick, Relaxed);
+                let state = self.fsm.update(h.sample.temp);
+                sim::STATE_FIRST_TICK[state as usize].fetch_min(h.tick, Relaxed);
             }
-            let scale = [1.0, DERATE_SCALE, 0.0][self.state as usize];
+            let state = self.fsm.state;
             output.set_payload(ThermalLimit {
-                scale,
-                state: self.state,
+                scale: ThermalFsm::scale(state),
+                state,
             }); // held between activations
         });
         self.tick += 1;
@@ -247,7 +212,7 @@ impl CuTask for ThermalFsm {
 pub struct CurrentLoop {
     tick: u64,
     #[reflect(ignore)]
-    pi: Pid<f32>,
+    ctl: CurrentCtl,
 }
 impl Freezable for CurrentLoop {}
 
@@ -257,11 +222,10 @@ impl CuTask for CurrentLoop {
     type Output<'m> = output_msg!(VoltageCmd);
 
     fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self> {
-        let pi = Pid::new(CUR_KP, CUR_KI, 0.0, DT as f32)
-            .map_err(cfg_err)?
-            .with_output_limits(-V_BUS, V_BUS)
-            .map_err(cfg_err)?;
-        Ok(Self { tick: 0, pi })
+        Ok(Self {
+            tick: 0,
+            ctl: CurrentCtl::new().map_err(cfg_err)?,
+        })
     }
 
     fn process(
@@ -274,18 +238,12 @@ impl CuTask for CurrentLoop {
         timed(sim::CUR, critical(self.tick), || {
             if let (Some(s), Some(r), Some(l)) = (sensor.payload(), iref.payload(), limit.payload())
             {
-                let lim = I_MAX * l.scale;
-                let setpoint = r.amps.clamp(-lim, lim);
+                let out = self.ctl.update(r.amps, s.current, l.scale, l.state);
                 if l.state == DERATING {
                     sim::DERATE_SETPOINT_MAX_MA
-                        .fetch_max((setpoint.abs() * 1000.0) as u64, Relaxed);
+                        .fetch_max((out.setpoint.abs() * 1000.0) as u64, Relaxed);
                 }
-                let volts = if l.state == FAULT {
-                    self.pi.reset();
-                    0.0
-                } else {
-                    self.pi.update(setpoint, s.current)
-                };
+                let volts = out.volts;
                 output.set_payload(VoltageCmd { volts });
             }
         });
