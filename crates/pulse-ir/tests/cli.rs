@@ -11,7 +11,7 @@ const MODEL: &str = concat!(
     "/../../examples/single_joint/single_joint.ir.json"
 );
 /// The hash the single-joint example reports for the same IR (built in Rust, not parsed from JSON).
-const HASH: &str = "fnv1a64:d6124ddb5c41f076";
+const HASH: &str = "fnv1a64:1280b212dc18e23e";
 
 fn model() -> Value {
     serde_json::from_str(&std::fs::read_to_string(MODEL).unwrap()).unwrap()
@@ -130,12 +130,11 @@ fn usage_errors_exit_2() {
     );
 }
 
-/// What `pulse gen` prints is, byte for byte, the firmware the example ships (headers aside).
+/// What `pulse gen` prints is, byte for byte, the firmware the example ships.
 #[test]
 fn gen_is_the_shipped_firmware() {
     let o = run(&["gen", MODEL], "");
     assert_eq!(o.status.code(), Some(0));
-    let body = |s: &str| s.split_once("\n\n").unwrap().1.to_string();
     let shipped = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../pulse-joint/src/generated.rs"
@@ -143,7 +142,7 @@ fn gen_is_the_shipped_firmware() {
     .unwrap();
     let out = String::from_utf8(o.stdout).unwrap();
     assert!(out.contains(HASH), "header names the IR");
-    assert_eq!(body(&out), body(&shipped));
+    assert_eq!(out, shipped);
 }
 
 #[test]

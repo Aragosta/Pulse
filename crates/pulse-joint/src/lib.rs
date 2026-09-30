@@ -92,6 +92,9 @@ impl PositionCtl {
     pub fn update(&mut self, setpoint: f32, theta: f32) -> f32 {
         self.0.update(setpoint, theta)
     }
+    pub fn reset(&mut self) {
+        self.0.reset();
+    }
 }
 
 /// Thermal state machine (200 Hz): nominal -> derating -> fault, fault latched, hysteresis on recovery.
@@ -105,7 +108,7 @@ impl ThermalFsm {
     }
     pub fn update(&mut self, temp: f32) -> u8 {
         self.state = match self.state {
-            _ if temp > T_FAULT || temp.is_nan() => FAULT, // a broken (NaN) sensor faults too
+            _ if temp > T_FAULT || !temp.is_finite() => FAULT, // a broken (NaN, +-inf) sensor faults too
             FAULT => FAULT,
             NOMINAL if temp > T_DERATE => DERATING,
             DERATING if temp < T_RECOVER => NOMINAL,
@@ -166,6 +169,9 @@ impl CurrentCtl {
         };
         CurrentOut { volts, setpoint }
     }
+    pub fn reset(&mut self) {
+        self.0.reset();
+    }
 }
 
 #[cfg(test)]
@@ -184,13 +190,13 @@ mod tests {
         f32::NAN,
     ];
 
-    /// Every (state, temperature class) pair: fault is absorbing, NaN and over-temperature always fault.
+    /// Every (state, temperature class) pair: fault is absorbing, NaN, +-inf and over-temperature always fault.
     #[test]
     fn thermal_fsm_transition_table() {
         for from in [NOMINAL, DERATING, FAULT] {
             for t in TEMPS {
                 let to = ThermalFsm { state: from }.update(t);
-                let want = if from == FAULT || t > T_FAULT || t.is_nan() {
+                let want = if from == FAULT || t > T_FAULT || !t.is_finite() {
                     FAULT
                 } else if from == NOMINAL && t > T_DERATE {
                     DERATING
@@ -272,9 +278,11 @@ mod tests {
 
     /// The firmware generated from the IR is the hand-written controllers wired as the old Copper tasks wired them
     /// (position PID and thermal FSM firing every 40th tick and holding their outputs, the current PI every tick),
-    /// plus two fixes: a bad current or angle sample is replaced by the last good one, and the command is clamped
-    /// into its envelope (a bad one holds the last good). So that chain, fed the same substituted and clamped
-    /// values, must match it bit for bit, including NaN temperatures, rail saturation and fault resets.
+    /// plus fixes: a bad current or angle sample is replaced by the last good one, but the next bad one after
+    /// `MAX_DROPOUT_RUN` in a row zeroes that PID's output and resets it (a lost sensor); the command is clamped into
+    /// its envelope (a bad one holds the last good); an infinite temperature faults. So that chain, fed the same
+    /// substituted and clamped values, must match it bit for bit, including NaN temperatures, rail saturation, fault
+    /// resets and lost sensors (half the runs are bursty enough to lose them).
     #[test]
     #[allow(clippy::manual_clamp)] // must be the generated code's exact operations, not clamp()
     fn generated_firmware_matches_hand_written_chain() {
@@ -289,14 +297,16 @@ mod tests {
             -1e30,
             8.0,
         ];
-        let pick = |rng: &mut Pcg32<f32>, lo: f32, hi: f32| {
-            if rng.next_unit() < 0.05 {
+        let pick = |rng: &mut Pcg32<f32>, p_odd: f32, lo: f32, hi: f32| {
+            if rng.next_unit() < p_odd {
                 odd[(rng.next_unit() * odd.len() as f32) as usize % odd.len()]
             } else {
                 lo + rng.next_unit() * (hi - lo)
             }
         };
+        let (mut lost_theta, mut lost_i) = (0, 0);
         for run in 0..50 {
+            let p = if run % 2 == 0 { 0.05 } else { 0.6 };
             let mut fw = generated::Firmware::new();
             let (mut pos, mut fsm, mut cur) = (
                 PositionCtl::new().unwrap(),
@@ -306,14 +316,26 @@ mod tests {
             let (mut amps, mut state) = (0.0, NOMINAL);
             // What the generated PIDs substitute for a bad sample: their stored last good measurement.
             let (mut last_theta, mut last_i, mut last_cmd) = (0.0, 0.0, 0.0);
+            // Consecutive bad samples each PID has bridged.
+            let (mut bad_theta, mut bad_i) = (0, 0);
+            let lost = |ok: bool, bad: &mut u32| {
+                let lost = !ok && *bad >= MAX_DROPOUT_RUN;
+                *bad = if ok {
+                    0
+                } else {
+                    (*bad + 1).min(MAX_DROPOUT_RUN)
+                };
+                lost
+            };
             for k in 0..4000u32 {
-                let theta = pick(&mut rng, -2.0, 2.0);
-                let current = pick(&mut rng, -10.0, 10.0);
-                let temp = pick(&mut rng, 20.0, 110.0);
-                let cmd = pick(&mut rng, -12.0, 12.0); // anything: the firmware enforces the envelope
+                let theta = pick(&mut rng, p, -2.0, 2.0);
+                let current = pick(&mut rng, p, -10.0, 10.0);
+                let temp = pick(&mut rng, 0.05, 20.0, 110.0);
+                let cmd = pick(&mut rng, p, -12.0, 12.0); // anything: the firmware enforces the envelope
                 if k.is_multiple_of(DECIMATION as u32) {
+                    let gone = lost(theta.is_finite(), &mut bad_theta);
                     let th = if theta.is_finite() { theta } else { last_theta };
-                    last_theta = th;
+                    last_theta = if gone { 0.0 } else { th };
                     let c = if cmd.is_finite() {
                         cmd.max(-THETA_CMD_MAX).min(THETA_CMD_MAX)
                     } else {
@@ -321,11 +343,22 @@ mod tests {
                     };
                     last_cmd = c;
                     amps = pos.update(c, th);
+                    if gone {
+                        pos.reset();
+                        amps = 0.0;
+                        lost_theta += 1;
+                    }
                     state = fsm.update(temp);
                 }
+                let gone = lost(current.is_finite(), &mut bad_i);
                 let fed = if current.is_finite() { current } else { last_i };
-                last_i = if state == FAULT { 0.0 } else { fed };
-                let want = cur.update(amps, fed, ThermalFsm::scale(state), state);
+                last_i = if state == FAULT || gone { 0.0 } else { fed };
+                let mut want = cur.update(amps, fed, ThermalFsm::scale(state), state);
+                if gone {
+                    cur.reset();
+                    want.volts = 0.0;
+                    lost_i += 1;
+                }
                 let got = fw.step(theta, current, temp, cmd);
                 assert!(
                     got.0.to_bits() == want.volts.to_bits()
@@ -336,6 +369,28 @@ mod tests {
                     want.setpoint
                 );
             }
+        }
+        assert!(
+            lost_theta > 0 && lost_i > 0,
+            "lost sensors exercised: {lost_theta} {lost_i}"
+        );
+    }
+
+    /// A dead sensor (NaN forever) used to be bridged with its last good sample forever: the integral wound up and the
+    /// joint was driven at full current (lost encoder) or full bus voltage (lost current sense) until a thermal fault.
+    #[test]
+    fn lost_sensor_stops_the_motor() {
+        for dead in [0, 1] {
+            let mut fw = generated::Firmware::new();
+            let mut out = (0.0, 0.0, 0.0);
+            for k in 0..8000 {
+                let bad = |i| if k >= 100 && dead == i { f32::NAN } else { 0.0 };
+                out = fw.step(bad(0), bad(1), 25.0, 1.0);
+            }
+            // Lost encoder: the position loop commands 0 A. Lost current sense: the current loop outputs 0 V.
+            let effort = if dead == 0 { out.2 } else { out.0 };
+            assert_eq!(effort, 0.0, "sensor {dead} dead: {out:?}");
+            assert_eq!(out.1, NOMINAL as f32);
         }
     }
 

@@ -108,8 +108,7 @@ pub fn firmware(ir: &Ir) -> Result<Firmware, Vec<String>> {
             }
         }
         if let (Some(Some(o)), Some(Some(i))) = (out, inp)
-            && ((o.ty == Ty::Bool) != (i.ty == Ty::Bool)
-                || (o.unit.is_some() && i.unit.is_some() && o.unit != i.unit))
+            && (o.ty != i.ty || (o.unit.is_some() && i.unit.is_some() && o.unit != i.unit))
         {
             bad.push(format!(
                 "{}.{} ({:?} {:?}) -> {}.{} ({:?} {:?}): type or unit mismatch",

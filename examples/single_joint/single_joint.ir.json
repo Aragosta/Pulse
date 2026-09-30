@@ -228,14 +228,9 @@
                     },
                     {
                       "Not": {
-                        "Eq": [
-                          {
-                            "Var": "temp"
-                          },
-                          {
-                            "Var": "temp"
-                          }
-                        ]
+                        "IsFinite": {
+                          "Var": "temp"
+                        }
                       }
                     }
                   ]
@@ -369,7 +364,7 @@
           },
           {
             "name": "state",
-            "ty": "U8",
+            "ty": "F32",
             "unit": "1"
           }
         ],
@@ -710,6 +705,11 @@
             "name": "hi",
             "value": 24.0,
             "unit": "V"
+          },
+          {
+            "name": "max_bad",
+            "value": 3.0,
+            "unit": "1"
           }
         ],
         "state": [
@@ -759,9 +759,63 @@
               "Bool": false
             },
             "unit": "1"
+          },
+          {
+            "name": "bad",
+            "init": {
+              "Num": 0.0
+            },
+            "unit": "1",
+            "range": [
+              0.0,
+              3.0
+            ]
           }
         ],
         "defs": [
+          {
+            "name": "ok",
+            "expr": {
+              "IsFinite": {
+                "Var": "measured"
+              }
+            }
+          },
+          {
+            "name": "lost",
+            "expr": {
+              "And": [
+                {
+                  "Not": {
+                    "Var": "ok"
+                  }
+                },
+                {
+                  "Ge": [
+                    {
+                      "Var": "bad"
+                    },
+                    {
+                      "Var": "max_bad"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "name": "rst",
+            "expr": {
+              "Or": [
+                {
+                  "Var": "reset"
+                },
+                {
+                  "Var": "lost"
+                }
+              ]
+            }
+          },
           {
             "name": "meas",
             "expr": {
@@ -943,19 +997,29 @@
           {
             "name": "out",
             "expr": {
-              "Min": [
+              "Select": [
                 {
-                  "Max": [
-                    {
-                      "Var": "unsat"
-                    },
-                    {
-                      "Var": "lo"
-                    }
-                  ]
+                  "Var": "lost"
                 },
                 {
-                  "Var": "hi"
+                  "Num": 0.0
+                },
+                {
+                  "Min": [
+                    {
+                      "Max": [
+                        {
+                          "Var": "unsat"
+                        },
+                        {
+                          "Var": "lo"
+                        }
+                      ]
+                    },
+                    {
+                      "Var": "hi"
+                    }
+                  ]
                 }
               ]
             }
@@ -1033,7 +1097,7 @@
             "expr": {
               "Select": [
                 {
-                  "Var": "reset"
+                  "Var": "rst"
                 },
                 {
                   "Num": 0.0
@@ -1073,7 +1137,7 @@
             "expr": {
               "Select": [
                 {
-                  "Var": "reset"
+                  "Var": "rst"
                 },
                 {
                   "Num": 0.0
@@ -1088,7 +1152,7 @@
             "name": "has_prev",
             "expr": {
               "Not": {
-                "Var": "reset"
+                "Var": "rst"
               }
             }
           },
@@ -1097,7 +1161,7 @@
             "expr": {
               "Select": [
                 {
-                  "Var": "reset"
+                  "Var": "rst"
                 },
                 {
                   "Num": 0.0
@@ -1112,8 +1176,38 @@
             "name": "filt_init",
             "expr": {
               "Not": {
-                "Var": "reset"
+                "Var": "rst"
               }
+            }
+          },
+          {
+            "name": "bad",
+            "expr": {
+              "Select": [
+                {
+                  "Var": "ok"
+                },
+                {
+                  "Num": 0.0
+                },
+                {
+                  "Min": [
+                    {
+                      "Add": [
+                        {
+                          "Var": "bad"
+                        },
+                        {
+                          "Num": 1.0
+                        }
+                      ]
+                    },
+                    {
+                      "Var": "max_bad"
+                    }
+                  ]
+                }
+              ]
             }
           }
         ]
@@ -1179,6 +1273,11 @@
             "name": "hi",
             "value": 8.0,
             "unit": "A"
+          },
+          {
+            "name": "max_bad",
+            "value": 3.0,
+            "unit": "1"
           }
         ],
         "state": [
@@ -1228,9 +1327,63 @@
               "Bool": false
             },
             "unit": "1"
+          },
+          {
+            "name": "bad",
+            "init": {
+              "Num": 0.0
+            },
+            "unit": "1",
+            "range": [
+              0.0,
+              3.0
+            ]
           }
         ],
         "defs": [
+          {
+            "name": "ok",
+            "expr": {
+              "IsFinite": {
+                "Var": "measured"
+              }
+            }
+          },
+          {
+            "name": "lost",
+            "expr": {
+              "And": [
+                {
+                  "Not": {
+                    "Var": "ok"
+                  }
+                },
+                {
+                  "Ge": [
+                    {
+                      "Var": "bad"
+                    },
+                    {
+                      "Var": "max_bad"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "name": "rst",
+            "expr": {
+              "Or": [
+                {
+                  "Var": "reset"
+                },
+                {
+                  "Var": "lost"
+                }
+              ]
+            }
+          },
           {
             "name": "meas",
             "expr": {
@@ -1412,19 +1565,29 @@
           {
             "name": "out",
             "expr": {
-              "Min": [
+              "Select": [
                 {
-                  "Max": [
-                    {
-                      "Var": "unsat"
-                    },
-                    {
-                      "Var": "lo"
-                    }
-                  ]
+                  "Var": "lost"
                 },
                 {
-                  "Var": "hi"
+                  "Num": 0.0
+                },
+                {
+                  "Min": [
+                    {
+                      "Max": [
+                        {
+                          "Var": "unsat"
+                        },
+                        {
+                          "Var": "lo"
+                        }
+                      ]
+                    },
+                    {
+                      "Var": "hi"
+                    }
+                  ]
                 }
               ]
             }
@@ -1502,7 +1665,7 @@
             "expr": {
               "Select": [
                 {
-                  "Var": "reset"
+                  "Var": "rst"
                 },
                 {
                   "Num": 0.0
@@ -1542,7 +1705,7 @@
             "expr": {
               "Select": [
                 {
-                  "Var": "reset"
+                  "Var": "rst"
                 },
                 {
                   "Num": 0.0
@@ -1557,7 +1720,7 @@
             "name": "has_prev",
             "expr": {
               "Not": {
-                "Var": "reset"
+                "Var": "rst"
               }
             }
           },
@@ -1566,7 +1729,7 @@
             "expr": {
               "Select": [
                 {
-                  "Var": "reset"
+                  "Var": "rst"
                 },
                 {
                   "Num": 0.0
@@ -1581,8 +1744,38 @@
             "name": "filt_init",
             "expr": {
               "Not": {
-                "Var": "reset"
+                "Var": "rst"
               }
+            }
+          },
+          {
+            "name": "bad",
+            "expr": {
+              "Select": [
+                {
+                  "Var": "ok"
+                },
+                {
+                  "Num": 0.0
+                },
+                {
+                  "Min": [
+                    {
+                      "Add": [
+                        {
+                          "Var": "bad"
+                        },
+                        {
+                          "Num": 1.0
+                        }
+                      ]
+                    },
+                    {
+                      "Var": "max_bad"
+                    }
+                  ]
+                }
+              ]
             }
           }
         ]

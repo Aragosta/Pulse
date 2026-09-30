@@ -48,7 +48,7 @@ A **component** is a named `compute` in the IR's library. `Use { name, component
 
 ## 5. Units
 
-Every numeric port, param and state may carry a unit (`V`, `A`, `V/(A*s)`, `1` for dimensionless). `+ − max min select` and comparisons need equal units, `× ÷` combine them, a bare literal adopts its context. Symbols are independent: no conversions, so one spelling per quantity. Components are checked once; each binding against the component's declared input unit; each firmware edge between blocks must connect equal units.
+Every numeric port, param and state may carry a unit (`V`, `A`, `V/(A*s)`, `1` for dimensionless). `+ − max min select` and comparisons need equal units, `× ÷` combine them, a bare literal adopts its context. Symbols are independent: no conversions, so one spelling per quantity. Components are checked once; each binding against the component's declared input unit; each firmware edge between blocks must connect equal types and equal units.
 
 ## 6. What the proofs mean
 

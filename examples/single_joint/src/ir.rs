@@ -41,8 +41,10 @@ fn sv(name: &str, init: Expr, unit: &str, range: Option<[f64; 2]>) -> StateVar {
 }
 
 /// A PID controller as an IR component: multicalc's `Pid::update` term for term (the same f32 operations in the same
-/// order), plus one fix: a non-finite measurement is replaced by the last good one before use, so a bad sample cannot
-/// reach the state and latch the output (the hand-written loop latched at the rail). Derivative on the measurement
+/// order), plus two fixes. A non-finite measurement is replaced by the last good one before use, so a bad sample cannot
+/// reach the state and latch the output (the hand-written loop latched at the rail). But only `max_bad` in a row: the
+/// next bad one means the sensor is lost, so the output is 0 and the state resets until a good sample returns (holding
+/// the last good one forever wound the integral up and drove the motor at full effort on a dead sensor). Derivative on the measurement
 /// through a one-pole filter; conditional integration against the output limits. `reset` returns it to its initial
 /// state (its output is then the caller's business).
 struct Pid {
@@ -57,6 +59,8 @@ struct Pid {
     hi: f64,
     /// A good measurement is within +-this.
     meas_max: f64,
+    /// Consecutive bad measurements bridged with the last good one; the next is a lost sensor.
+    max_bad: f64,
     out: &'static str,
     meas: &'static str,
 }
@@ -67,7 +71,7 @@ impl Pid {
         // Invariants proved by `class3`: the integral within the output limits, the stored measurement within
         // `meas_max`, the filtered derivative within what that measurement range allows (2x margin).
         let d_max = 2.0 * (2.0 * self.meas_max / self.dt);
-        let or_reset = |e: Expr| select(var("reset"), num(0.0), e);
+        let or_reset = |e: Expr| select(var("rst"), num(0.0), e);
         let compute = Compute {
             inputs: vec![
                 port("setpoint", Ty::F32, m, None),
@@ -90,6 +94,7 @@ impl Pid {
                 param("smoothing", self.smoothing, "1"),
                 param("lo", self.lo, o),
                 param("hi", self.hi, o),
+                param("max_bad", self.max_bad, "1"),
             ],
             state: vec![
                 sv("integral", num(0.0), o, Some([self.lo, self.hi])),
@@ -102,8 +107,12 @@ impl Pid {
                 sv("has_prev", Expr::Bool(false), "1", None),
                 sv("filt", num(0.0), &format!("{m}/s"), Some([-d_max, d_max])),
                 sv("filt_init", Expr::Bool(false), "1", None),
+                sv("bad", num(0.0), "1", Some([0.0, self.max_bad])),
             ],
             defs: vec![
+                def("ok", var("measured").is_finite()),
+                def("lost", var("ok").not().and(var("bad").ge(var("max_bad")))),
+                def("rst", var("reset").or(var("lost"))),
                 def(
                     "meas",
                     select(
@@ -137,7 +146,14 @@ impl Pid {
                     var("integral") + var("ki") * var("error") * var("dt"),
                 ),
                 def("unsat", var("p_term") + var("cand") + var("d_term")),
-                def("out", var("unsat").max(var("lo")).min(var("hi"))),
+                def(
+                    "out",
+                    select(
+                        var("lost"),
+                        num(0.0),
+                        var("unsat").max(var("lo")).min(var("hi")),
+                    ),
+                ),
                 def(
                     "deeper",
                     (var("unsat").gt(var("hi")).and(var("error").gt(num(0.0))))
@@ -161,9 +177,17 @@ impl Pid {
                     ),
                 ),
                 def("prev_meas", or_reset(var("meas"))),
-                def("has_prev", var("reset").not()),
+                def("has_prev", var("rst").not()),
                 def("filt", or_reset(var("filt_d"))),
-                def("filt_init", var("reset").not()),
+                def("filt_init", var("rst").not()),
+                def(
+                    "bad",
+                    select(
+                        var("ok"),
+                        num(0.0),
+                        (var("bad") + num(1.0)).min(var("max_bad")),
+                    ),
+                ),
             ],
         };
         Component {
@@ -183,6 +207,7 @@ const CURRENT_PID: Pid = Pid {
     lo: -V_BUS as f64,
     hi: V_BUS as f64,
     meas_max: I_SENSE_MAX as f64,
+    max_bad: MAX_DROPOUT_RUN as f64,
     out: "V",
     meas: "A",
 };
@@ -197,6 +222,7 @@ const POSITION_PID: Pid = Pid {
     lo: -I_MAX as f64,
     hi: I_MAX as f64,
     meas_max: THETA_SENSE_MAX as f64,
+    max_bad: MAX_DROPOUT_RUN as f64,
     out: "A",
     meas: "rad",
 };
@@ -263,7 +289,7 @@ pub fn position_loop() -> Compute {
     }
 }
 
-/// The 200 Hz thermal state machine: nominal -> derating -> fault (latched), hysteresis on recovery, NaN faults.
+/// The 200 Hz thermal state machine: nominal -> derating -> fault (latched), hysteresis on recovery, NaN/inf faults.
 /// `scale` limits the current: 1 nominal, `DERATE_SCALE` derating, 0 fault.
 pub fn thermal_fsm() -> Compute {
     let temp = || var("temp");
@@ -279,11 +305,12 @@ pub fn thermal_fsm() -> Compute {
         states: ["nominal", "derating", "fault"].map(String::from).to_vec(),
         initial: "nominal".into(),
         transitions: vec![
-            // From anywhere: over-temperature, or a broken (NaN) sensor. Fault then has no way out: latched.
+            // From anywhere: over-temperature, or a broken (NaN or infinite) sensor. Fault then has no way out:
+            // latched. `!is_finite`, not `temp != temp`: a -inf sample would otherwise pass as cold and recover.
             to(
                 &[],
                 "fault",
-                temp().gt(var("t_fault")).or(temp().eq(temp()).not()),
+                temp().gt(var("t_fault")).or(temp().is_finite().not()),
             ),
             to(&["nominal"], "derating", temp().gt(var("t_derate"))),
             to(&["derating"], "nominal", temp().lt(var("t_recover"))),
@@ -336,7 +363,7 @@ pub fn current_loop() -> Compute {
                 ..port("measured", Ty::F32, "A", Some([-meas_max, meas_max]))
             },
             port("scale", Ty::F32, "1", None),
-            port("state", Ty::U8, "1", None),
+            port("state", Ty::F32, "1", None),
         ],
         params: vec![
             param("i_max", I_MAX as f64, "A"),
@@ -559,11 +586,8 @@ mod tests {
 
     /// Firmware generated from the IR. Regenerate with `PULSE_BLESS=1 cargo test -p single_joint`.
     pub fn generated_source() -> String {
-        format!(
-            "//! GENERATED from the Pulse IR (`examples/single_joint/src/ir.rs`). Do not edit; regenerate with\n\
-             //! `PULSE_BLESS=1 cargo test -p single_joint`.\n\n{}",
-            pulse_ir::rust::emit("Firmware", &firmware())
-        )
+        let ev = pulse_ir::evidence::evidence(&single_joint()).expect("the single joint is proved");
+        pulse_ir::rust::firmware(&single_joint(), &ev.ir_hash)
     }
 
     #[test]

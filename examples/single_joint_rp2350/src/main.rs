@@ -154,10 +154,16 @@ fn main() -> ! {
 
 #[unsafe(link_section = ".bi_entries")]
 #[used]
-pub static PICOTOOL_ENTRIES: [hal::binary_info::EntryAddr; 3] = [
+pub static PICOTOOL_ENTRIES: [hal::binary_info::EntryAddr; 4] = [
     hal::binary_info::rp_cargo_bin_name!(),
     hal::binary_info::rp_cargo_version!(),
     hal::binary_info::rp_program_description!(
         c"Pulse single joint: generated firmware step at 8 kHz"
+    ),
+    // The IR the step was generated from: `picotool info -a` on a board names the evidence that covers it.
+    hal::binary_info::str!(
+        hal::binary_info::consts::TAG_RASPBERRY_PI,
+        hal::binary_info::consts::ID_RP_PROGRAM_FEATURE,
+        pulse_joint::generated::IR_HASH
     ),
 ];

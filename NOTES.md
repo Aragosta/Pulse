@@ -60,17 +60,17 @@ Limits of this proof: intervals are non-relational, so invariants that depend on
 
 | Need | For | Status |
 |---|---|---|
-| Serialized, versioned (JSON), stable ids, source spans | frontends, MCP, evidence | **done**: `IR_VERSION` (now 3), serde with `deny_unknown_fields`, `span` |
+| Serialized, versioned (JSON), stable ids, source spans | frontends, MCP, evidence | **done**: `IR_VERSION` (now 4), serde with `deny_unknown_fields`, `span` |
 | Block -> implementation binding (`imp`) and edge payload type (`msg`) | codegen; seed of opaque blocks and typed ports | **done (v2)** |
 | Stable violation codes (`C1-HOLD-MISSING`, ...) | CLI, CI, MCP | **done** |
 | Well-formedness at the trust boundary: version, unique identifier ids, `imp`/`msg` are Rust paths (`Ir::validate`, `IR-*` codes) | every pass; frontends and agents are untrusted | **done (v3)** |
 | Declared delays (`delay_ticks`, Modelica `previous`); every feedback loop needs one (`C1-LOOP`) | Class 1 causality | **done (v3)** |
-| Content hash that WCET results and proofs bind to | Class 1/3 evidence | later |
+| Content hash that WCET results and proofs bind to | Class 1/3 evidence | **done**: FNV-1a in the evidence and in the generated firmware (`IR_HASH`); SHA-256 before evidence leaves the building |
 | Clocks: rational period + shift; triggered clocks | Class 1 | later (integer Hz today) |
 | WCET: budget + slot for provider bound with provenance | Class 1 (D-001) | budget only |
 | Latency declared on paths, not single edges | Class 1 | later |
 | Typed ports: dtype, unit, range | Class 2/3 | later |
-| State machines as data: states, guards, transitions | Class 2 (exhaustive, reachable, deterministic) | later; FSM is opaque Rust today |
+| State machines as data: states, guards, transitions | Class 2 (exhaustive, reachable, deterministic) | **done** (`Stmt::Fsm`); guard satisfiability not checked |
 | Small total expression language (no loops/alloc) for updates, guards, contracts | Class 3 (SMT) + codegen read the same terms | later |
 | Opaque blocks (hand-written Rust, policy/agent blocks) checked only at contract boundary, labelled reduced assurance; policy blocks add output envelope + monitor + fallback | Class 3, runtime assurance | later |
 
@@ -169,10 +169,13 @@ Python is a compile-time authoring layer only, never linked into the binary (Pyt
 - [ ] Align hold vocabulary with Modelica 3.3 synchronous (`subSample`, `hold`, `previous`) and add ModelingToolkit.jl clocks to prior art
 - [ ] Minimal Python frontend that writes the single-joint IR JSON (D-004)
 - [x] Expression language + typed ports in the IR; current loop generated from it and running (D-007)
-- [ ] Generate task glue from the IR (needs FSM as data)
-- [ ] IR: FSM as data; I/O vs environment blocks; NN block
+- [x] IR: FSM as data; firmware vs outside world
+- [ ] IR: I/O declared per port (pin, conversion, calibration), so the board shim is generated
+- [ ] IR: NN block (v5)
 - [x] Fix the NaN latch in the current loop, with `C3-INVARIANT` proving a bad sample cannot latch (D-007)
-- [ ] JSON Schema for the IR (`schemars`) and the MCP server, when a frontend or agent consumes the file
+- [x] `pulse` CLI (`check`, `gen`) and MCP server
+- [ ] JSON Schema for the IR (`schemars`)
 - [ ] Add "Frontend" section to `README.md` (D-004)
+- [x] Lost sensors: each PID bridges at most `MAX_DROPOUT_RUN` bad samples, then outputs 0 and resets (a dead encoder or current sense held its last good sample forever and drove the motor at full effort); an infinite temperature faults like NaN; edges must connect equal types; `pulse check` reports Class 1 and Class 3 failures together
 - [ ] Structural Coverage and Symbolic Proof on the single-joint example (only after Class 1 is solid, per the README)
 - [ ] Agent/policy blocks with WCET budgets (last, per the README)

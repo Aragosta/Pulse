@@ -28,11 +28,21 @@ fn range(r: [f64; 2]) -> String {
 }
 
 pub fn evidence(ir: &Ir) -> Result<Evidence, Vec<Violation>> {
-    let timing = class1::check(ir)?;
-    let bad = class3::check(ir);
-    if !bad.is_empty() {
-        return Err(bad);
-    }
+    // Every failure in one round, so a person or agent fixing the model sees all of them. Class 3 needs a well-formed
+    // IR, so a malformed one reports only its `IR-*` violations.
+    let bad = if ir.validate().is_empty() {
+        class3::check(ir)
+    } else {
+        vec![]
+    };
+    let timing = match class1::check(ir) {
+        Ok(t) if bad.is_empty() => t,
+        Ok(_) => return Err(bad),
+        Err(mut e) => {
+            e.extend(bad);
+            return Err(e);
+        }
+    };
     let fw = graph::firmware(ir).map_err(|es| {
         es.into_iter()
             .map(|e| v("graph", "IR-GRAPH", e))
