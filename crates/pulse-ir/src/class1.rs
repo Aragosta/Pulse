@@ -15,10 +15,10 @@ pub struct Staleness {
 pub struct Report {
     pub tick_ns: u64,
     pub hyperperiod_ticks: u32,
+    /// One per IR edge, in IR order.
     pub staleness: Vec<Staleness>,
-    /// Sum of WCET budgets on the busiest tick of the hyperperiod, and the tick it occurs on.
-    pub worst_tick_budget_ns: u64,
-    pub worst_tick: u32,
+    /// Sum of all WCET budgets: what any one tick may cost, since every task runs on every tick.
+    pub tick_budget_ns: u64,
 }
 
 fn gcd(a: u32, b: u32) -> u32 {
@@ -101,24 +101,6 @@ pub fn check(ir: &Ir) -> Result<Report, Vec<Violation>> {
                         ),
                     ));
                 }
-                // 3. Staleness: sensor latency + worst dropout run + one full hold period (consumer may read at any phase) + one tick to compute.
-                let lag = f.sensor.map_or(0, |s| s.latency_ticks + s.max_dropout_run) as u64;
-                let worst = (lag + n as u64 + 1) * tick_ns;
-                if e.max_age_ns.is_some_and(|m| worst > m) {
-                    bad.push(v(
-                        "staleness",
-                        "C1-STALE",
-                        format!(
-                            "{name}: worst-case age {worst} ns exceeds declared {} ns",
-                            e.max_age_ns.unwrap()
-                        ),
-                    ));
-                }
-                staleness.push(Staleness {
-                    edge: name,
-                    worst_age_ns: worst,
-                    declared_max_ns: e.max_age_ns,
-                });
             }
             (std::cmp::Ordering::Less, Some(Hold::Zoh)) => {}
             (_, Some(h)) => bad.push(v(
@@ -130,6 +112,44 @@ pub fn check(ir: &Ir) -> Result<Report, Vec<Violation>> {
                 ),
             )),
         }
+
+        // 3. Staleness, in base ticks, on every edge: from the producer computing (a sensor: sampling) a value to the
+        //    end of the last tick the consumer still acts on it. Every block fires on multiples of its period and
+        //    republishes in between, so it is
+        //      sensor lag + delay + wait for the producer's last firing + the consumer's own hold period.
+        //    At consumer firings k (multiples of pc) the producer last fired ((k - d) mod pf) ticks earlier, which
+        //    peaks at pf - g + ((-d) mod g), g = gcd(pc, pf). All arithmetic saturates: the numbers are untrusted.
+        let period = |id: &str| periods.iter().find(|(b, _)| *b == id).and_then(|(_, p)| *p);
+        let (Some(pf), Some(pc)) = (period(&e.from), period(&e.to)) else {
+            continue;
+        };
+        let (pf, pc, d, g) = (
+            pf as u64,
+            pc as u64,
+            e.delay_ticks as u64,
+            gcd(pc, pf) as u64,
+        );
+        // A sensor's latency and dropout run count its own samples, pf base ticks each.
+        let lag = f.sensor.map_or(0, |s| {
+            (s.latency_ticks as u64 + s.max_dropout_run as u64).saturating_mul(pf)
+        });
+        let wait = pf - g + (g - d % g) % g;
+        let worst = lag
+            .saturating_add(d)
+            .saturating_add(wait + pc)
+            .saturating_mul(tick_ns);
+        if let Some(m) = e.max_age_ns.filter(|&m| worst > m) {
+            bad.push(v(
+                "staleness",
+                "C1-STALE",
+                format!("{name}: worst-case age {worst} ns exceeds declared {m} ns"),
+            ));
+        }
+        staleness.push(Staleness {
+            edge: name,
+            worst_age_ns: worst,
+            declared_max_ns: e.max_age_ns,
+        });
     }
 
     // 4. Causality: every feedback loop crosses at least one delayed edge, so each tick has an evaluation order.
@@ -168,31 +188,19 @@ pub fn check(ir: &Ir) -> Result<Report, Vec<Violation>> {
         ));
     }
 
-    // 5. Tick budget: Copper runs the whole graph sequentially in one base-rate slot, so on the busiest tick
-    //    the sum of WCET budgets of every block firing on it must fit inside one tick.
-    let (mut worst_tick, mut worst_sum) = (0, 0);
-    if bad.is_empty() {
-        for tick in 0..hyper {
-            let sum: u64 = ir
-                .blocks
-                .iter()
-                .zip(&periods)
-                .filter(|(_, (_, p))| tick % p.unwrap() == 0)
-                .map(|(b, _)| b.wcet_budget_ns)
-                .sum();
-            if sum > worst_sum {
-                (worst_tick, worst_sum) = (tick, sum);
-            }
-        }
-        if worst_sum > tick_ns {
-            bad.push(v(
-                "wcet-budget",
-                "C1-BUDGET",
-                format!(
-                    "tick {worst_tick}: budgets sum to {worst_sum} ns > tick period {tick_ns} ns"
-                ),
-            ));
-        }
+    // 5. Tick budget: Copper runs every task on every base tick, sequentially in one slot; a slow task fires on its
+    //    ticks and republishes its held output on the others. So every tick, not just the one where all rates
+    //    align, costs up to the sum of all budgets (each budget bounds every call, firing or not).
+    let tick_budget_ns = ir
+        .blocks
+        .iter()
+        .fold(0u64, |s, b| s.saturating_add(b.wcet_budget_ns));
+    if tick_budget_ns > tick_ns {
+        bad.push(v(
+            "wcet-budget",
+            "C1-BUDGET",
+            format!("budgets sum to {tick_budget_ns} ns > tick period {tick_ns} ns"),
+        ));
     }
 
     if bad.is_empty() {
@@ -200,8 +208,7 @@ pub fn check(ir: &Ir) -> Result<Report, Vec<Violation>> {
             tick_ns,
             hyperperiod_ticks: hyper,
             staleness,
-            worst_tick_budget_ns: worst_sum,
-            worst_tick,
+            tick_budget_ns,
         })
     } else {
         Err(bad)
@@ -265,15 +272,16 @@ mod tests {
     fn valid_ir_passes() {
         let r = check(&good()).unwrap();
         assert_eq!(
-            (
-                r.hyperperiod_ticks,
-                r.tick_ns,
-                r.worst_tick,
-                r.worst_tick_budget_ns
-            ),
-            (40, 125_000, 0, 60_000)
+            (r.hyperperiod_ticks, r.tick_ns, r.tick_budget_ns),
+            (40, 125_000, 60_000)
         );
-        assert_eq!(r.staleness[0].worst_age_ns, (2 + 3 + 40 + 1) * 125_000);
+        // sensor lag 2 + 3, held by slow for 40; slow -> sink waits up to 39 then holds 1; fast -> sink 5 + 1.
+        let ages: Vec<u64> = r
+            .staleness
+            .iter()
+            .map(|s| s.worst_age_ns / 125_000)
+            .collect();
+        assert_eq!(ages, [45, 40, 6]);
     }
     #[test]
     fn unheld_cross_rate_edge_rejected() {
@@ -302,15 +310,44 @@ mod tests {
     #[test]
     fn over_budget_tick_rejected() {
         let mut ir = good();
-        ir.blocks[1].wcet_budget_ns = 100_000; // only the tick both fast+slow fire on is over: 20+100+10 > 125
+        ir.blocks[1].wcet_budget_ns = 100_000; // 20 + 100 + 10 > 125, on every tick
         assert_eq!(only(&ir), "C1-BUDGET");
-        assert!(check(&ir).unwrap_err()[0].msg.starts_with("tick 0:"));
     }
     #[test]
     fn stale_read_rejected() {
         let mut ir = good();
-        ir.edges[0].max_age_ns = Some(1_000_000); // 1 ms << derived 5.75 ms
+        ir.edges[0].max_age_ns = Some(1_000_000); // 1 ms << derived 5.625 ms
         assert_eq!(only(&ir), "C1-STALE");
+    }
+    #[test]
+    fn staleness_is_in_base_ticks_not_the_rate_ratio() {
+        // 1 kHz -> 200 Hz on an 8 kHz base is Decimate(5), but the consumer holds each read for 40 base ticks.
+        let mut ir = good();
+        ir.blocks.push(blk("mid", 1000, 0));
+        ir.edges.push(edge("mid", "slow", Some(Hold::Decimate(5))));
+        assert_eq!(check(&ir).unwrap().staleness[3].worst_age_ns, 40 * 125_000);
+    }
+    #[test]
+    fn declared_age_checked_on_every_edge() {
+        let mut ir = good();
+        ir.edges[1].max_age_ns = Some(1_000_000); // Zoh 200 Hz -> 8 kHz: up to 39 ticks waiting + 1 = 5 ms
+        assert_eq!(only(&ir), "C1-STALE");
+    }
+    #[test]
+    fn slow_sensor_lag_counts_its_own_samples() {
+        let mut ir = good();
+        ir.blocks[0].rate_hz = 1000; // latency 2 + dropout run 3 samples = 40 base ticks, then held for 40
+        ir.edges[0].hold = Some(Hold::Decimate(5));
+        ir.edges[2].hold = Some(Hold::Zoh); // fast -> sink is now 1 kHz -> 8 kHz
+        assert_eq!(check(&ir).unwrap().staleness[0].worst_age_ns, 80 * 125_000);
+    }
+    #[test]
+    fn huge_untrusted_numbers_do_not_overflow() {
+        let mut ir = good();
+        ir.blocks[0].sensor.as_mut().unwrap().latency_ticks = u32::MAX;
+        ir.blocks[1].wcet_budget_ns = u64::MAX;
+        ir.edges[0].delay_ticks = u32::MAX;
+        assert!(check(&ir).is_err());
     }
     #[test]
     fn unknown_block_rejected() {

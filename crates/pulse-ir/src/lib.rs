@@ -32,6 +32,7 @@ pub enum Formalism {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SensorSpec {
+    /// Counted in the sensor's own samples (one per firing), like `max_dropout_run`.
     pub latency_ticks: u32,
     pub quant_step: f32,
     pub dropout_p: f32,
@@ -45,7 +46,8 @@ pub struct Block {
     pub id: String,
     pub formalism: Formalism,
     pub rate_hz: u32,
-    /// Timing contract: the block must finish within this per activation. Proving WCET <= budget is a separate step (NOTES.md D-001).
+    /// Timing contract: every call must finish within this, including the republish calls of a slow block between
+    /// its firings (Copper runs every task on every base tick). Proving WCET <= budget is a separate step (NOTES.md D-001).
     pub wcet_budget_ns: u64,
     pub sensor: Option<SensorSpec>,
     /// Rust type implementing this block as a runtime task (e.g. `tasks::Sensor`). `None`: not a task (simulated plant).
@@ -71,7 +73,8 @@ pub struct Edge {
     pub from: String,
     pub to: String,
     pub hold: Option<Hold>,
-    /// Declared bound on the age of the value at the consumer; checked against the derived worst case.
+    /// Declared bound on the age of the value at the consumer, from the producer computing (or sampling) it to the end
+    /// of the last tick the consumer still acts on it; checked against the derived worst case.
     pub max_age_ns: Option<u64>,
     /// Ticks between the producer writing and the consumer seeing the value (Modelica `previous`). Every feedback
     /// loop needs at least one edge with a delay, otherwise the loop is an algebraic loop with no evaluation order.

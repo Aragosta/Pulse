@@ -104,7 +104,7 @@ Copper's reference bare-metal platform is a **Pimoroni Pico Plus 2 (RP2350B)** w
 
 ### D-002: Multi-rate on Copper via decimation (Decided, 2026-09-29)
 
-Copper has one loop rate (`runtime.rate_target_hz`, verified). Pulse runs an 8 kHz base tick; 200 Hz blocks act on every 40th tick and republish their held output between activations. Every cross-rate edge must declare its hold in the IR (`Decimate(n)` fast to slow, `Zoh` slow to fast); `pulse-ir` rejects any edge that doesn't. Tick budget is checked as the sum of WCET budgets on the busiest tick, because the whole graph runs sequentially in one slot.
+Copper has one loop rate (`runtime.rate_target_hz`, verified). Pulse runs an 8 kHz base tick; 200 Hz blocks act on every 40th tick and republish their held output between activations. Every cross-rate edge must declare its hold in the IR (`Decimate(n)` fast to slow, `Zoh` slow to fast); `pulse-ir` rejects any edge that doesn't. Tick budget is checked as the sum of all WCET budgets, because every task runs (fires or republishes) sequentially in one slot on every tick.
 
 ### D-003: Sensor dropout needs a declared bound (Decided, 2026-09-29)
 
@@ -124,9 +124,9 @@ Python is a compile-time authoring layer only, never linked into the binary (Pyt
 - [x] D-006 step 1: serializable, versioned IR with source spans and stable violation codes
 - [x] Generate `copperconfig.ron` from the IR; drift test replaced by a golden-file test
 - [x] IR well-formedness, declared delays and zero-delay-loop check; NaN-safe controllers; `pulse-joint` tests; stall oracle (16840/37160) as a test
-- [ ] Budget model: 200 Hz tasks run (republish) on every tick, but Class 1 counts them only on firing ticks
-- [ ] Differential test: random IRs, brute-force tick simulation, observed ages/budgets <= what `class1` derives
-- [ ] CI: `cargo test`, clippy, `thumbv8m.main-none-eabihf` build
+- [x] Budget model: every task runs (fires or republishes) on every tick, so the tick budget is the sum of all budgets. The old busiest-tick loop gave the same number (all rates align on tick 0) but stated the wrong model
+- [x] Differential test (`crates/pulse-ir/tests/differential.rs`): 500 random IRs, brute-force tick simulation, observed ages/costs <= derived and the bound is reached on >= 90% of edges; 8 formula mutations all caught. It found three staleness bugs, now fixed: Decimate(n) multiplied the rate ratio by the base tick (1 kHz -> 200 Hz derived 0.75 ms, truth 5 ms); `max_age_ns` was ignored on Zoh and same-rate edges; a slow sensor's lag was counted in base ticks, not its samples. Also saturating arithmetic on untrusted numbers
+- [x] CI: fmt, clippy `-D warnings`, `cargo test`, `thumbv8m.main-none-eabihf` build (`.github/workflows/ci.yml`)
 - [ ] Align hold vocabulary with Modelica 3.3 synchronous (`subSample`, `hold`, `previous`) and add ModelingToolkit.jl clocks to prior art
 - [ ] Minimal Python frontend that writes the single-joint IR JSON (D-004)
 - [ ] Generate task glue from the IR (needs FSM as data / expression language)

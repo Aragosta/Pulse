@@ -108,9 +108,8 @@ fn main() {
         stale.declared_max_ns.unwrap_or(0) as f64 / 1e6
     );
     println!(
-        "  [PASS] tick budget       tick {}: WCET budgets sum to {:.1} us <= {:.1} us",
-        report.worst_tick,
-        report.worst_tick_budget_ns as f64 / 1e3,
+        "  [PASS] tick budget       every tick: WCET budgets sum to {:.1} us <= {:.1} us",
+        report.tick_budget_ns as f64 / 1e3,
         tick_ns as f64 / 1e3
     );
     println!(
