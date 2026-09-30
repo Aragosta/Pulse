@@ -25,6 +25,8 @@ pub const TEMP_QUANT: f32 = 0.25;
 pub const I_SENSE_MAX: f32 = 64.0;
 /// Position sense range: a good angle sample is within +-this (multi-turn encoder).
 pub const THETA_SENSE_MAX: f32 = 100.0;
+/// Position command envelope: the firmware clamps any command into +-this and holds the last good one on NaN/inf.
+pub const THETA_CMD_MAX: f32 = 10.0;
 pub const DROPOUT_P: f32 = 0.02;
 pub const MAX_DROPOUT_RUN: u32 = 3;
 

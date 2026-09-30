@@ -291,10 +291,11 @@ pub fn firmware(ir: &Ir) -> Result<Firmware, Vec<String>> {
             if fire.is_some() {
                 fw.state.push(StateVar {
                     name: held.clone(),
-                    init: if o.ty == Ty::Bool {
-                        Expr::Bool(false)
-                    } else {
-                        num(0.0)
+                    // Never observed (every block fires on tick 0); inside the range so the invariant holds.
+                    init: match (o.ty, o.range) {
+                        (Ty::Bool, _) => Expr::Bool(false),
+                        (_, Some([lo, hi])) => num(0.0f64.max(lo).min(hi)),
+                        _ => num(0.0),
                     },
                     unit: o.unit.clone(),
                     range: o.range,
@@ -464,6 +465,36 @@ mod tests {
             0.0, 100.0, 200.0, 300.0, 401.0, 501.0, 601.0, 701.0, 802.0, 902.0,
         ];
         assert_eq!(ys, want.map(Val::N));
+    }
+
+    /// A slow block's held output starts inside the output's range, so a range excluding 0 is still provable.
+    #[test]
+    fn held_output_range_need_not_contain_zero() {
+        let c = Compute {
+            inputs: vec![],
+            params: vec![],
+            state: vec![],
+            defs: vec![
+                Def {
+                    name: "k".into(),
+                    expr: num(5.0),
+                }
+                .into(),
+            ],
+            outputs: vec![Port {
+                range: Some([1.0, 10.0]),
+                ..port("k")
+            }],
+            next: vec![],
+        };
+        let ir = Ir {
+            version: IR_VERSION,
+            base_rate_hz: 8,
+            blocks: vec![block("slow", 2, Some(c)), block("out", 8, None)],
+            edges: vec![edge("slow", "k", "out", "k", Some(Hold::Zoh))],
+            components: vec![],
+        };
+        assert_eq!(crate::class3::check(&ir), vec![]);
     }
 
     #[test]

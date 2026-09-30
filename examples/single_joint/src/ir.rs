@@ -216,12 +216,20 @@ fn use_pid(pid: &Pid, setpoint: Expr, measured: Expr, reset: Expr) -> Stmt {
     })
 }
 
-/// The 200 Hz position loop: PID from the commanded angle to a current setpoint.
+/// The 200 Hz position loop: PID from the commanded angle to a current setpoint. The command comes from outside
+/// (an operator, a planner, a learned policy), so it is enforced, not trusted: clamped into the envelope, and a NaN or
+/// infinite command holds the last good target.
 pub fn position_loop() -> Compute {
+    let cmd_max = || var("cmd_max");
+    let tgt = select(
+        var("target").is_finite(),
+        var("target").max(-cmd_max()).min(cmd_max()),
+        var("last_target"),
+    );
+    let lim = THETA_CMD_MAX as f64;
     Compute {
         inputs: vec![
-            // Assumed: the command source only sends finite angles within +-10 rad.
-            port("target", Ty::F32, "rad", Some([-10.0, 10.0])),
+            port("target", Ty::F32, "rad", None),
             Port {
                 glitch: true,
                 ..port(
@@ -232,12 +240,13 @@ pub fn position_loop() -> Compute {
                 )
             },
         ],
-        params: vec![],
-        state: vec![],
+        params: vec![param("cmd_max", lim, "rad")],
+        state: vec![sv("last_target", num(0.0), "rad", Some([-lim, lim]))],
         defs: vec![
+            def("tgt", tgt).into(),
             use_pid(
                 &POSITION_PID,
-                var("target"),
+                var("tgt"),
                 var("measured"),
                 Expr::Bool(false),
             ),
@@ -249,7 +258,7 @@ pub fn position_loop() -> Compute {
             "A",
             Some([-I_MAX as f64, I_MAX as f64]),
         )],
-        next: vec![],
+        next: vec![def("last_target", var("tgt"))],
     }
 }
 
@@ -634,7 +643,7 @@ mod tests {
             let theta = rng.pick((-2.0, 2.0), &ODD);
             let current = rng.pick((-10.0, 10.0), &ODD);
             let temp = rng.pick((20.0, 110.0), &ODD);
-            let cmd = rng.pick((-1.0, 1.0), &[0.0]);
+            let cmd = rng.pick((-12.0, 12.0), &ODD);
             let ins = [theta, current, temp, cmd].map(Val::N).to_vec();
             let (outs, next) = c.step(&mut F32, ins, state);
             state = next;

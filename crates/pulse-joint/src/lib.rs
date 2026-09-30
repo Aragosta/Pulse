@@ -271,9 +271,11 @@ mod tests {
 
     /// The firmware generated from the IR is the hand-written controllers wired as the old Copper tasks wired them
     /// (position PID and thermal FSM firing every 40th tick and holding their outputs, the current PI every tick),
-    /// plus one fix: a bad current or angle sample is replaced by the last good one. So that chain, fed the
-    /// substituted samples, must match it bit for bit, including NaN temperatures, rail saturation and fault resets.
+    /// plus two fixes: a bad current or angle sample is replaced by the last good one, and the command is clamped
+    /// into its envelope (a bad one holds the last good). So that chain, fed the same substituted and clamped
+    /// values, must match it bit for bit, including NaN temperatures, rail saturation and fault resets.
     #[test]
+    #[allow(clippy::manual_clamp)] // must be the generated code's exact operations, not clamp()
     fn generated_firmware_matches_hand_written_chain() {
         let mut rng = Pcg32::new(7);
         let odd = [
@@ -302,16 +304,22 @@ mod tests {
             );
             let (mut amps, mut state) = (0.0, NOMINAL);
             // What the generated PIDs substitute for a bad sample: their stored last good measurement.
-            let (mut last_theta, mut last_i) = (0.0, 0.0);
+            let (mut last_theta, mut last_i, mut last_cmd) = (0.0, 0.0, 0.0);
             for k in 0..4000u32 {
                 let theta = pick(&mut rng, -2.0, 2.0);
                 let current = pick(&mut rng, -10.0, 10.0);
                 let temp = pick(&mut rng, 20.0, 110.0);
-                let cmd = rng.next_unit() * 2.0 - 1.0; // the command contract: finite, within +-10 rad
+                let cmd = pick(&mut rng, -12.0, 12.0); // anything: the firmware enforces the envelope
                 if k.is_multiple_of(DECIMATION as u32) {
                     let th = if theta.is_finite() { theta } else { last_theta };
                     last_theta = th;
-                    amps = pos.update(cmd, th);
+                    let c = if cmd.is_finite() {
+                        cmd.max(-THETA_CMD_MAX).min(THETA_CMD_MAX)
+                    } else {
+                        last_cmd
+                    };
+                    last_cmd = c;
+                    amps = pos.update(c, th);
                     state = fsm.update(temp);
                 }
                 let fed = if current.is_finite() { current } else { last_i };

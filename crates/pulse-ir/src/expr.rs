@@ -532,6 +532,15 @@ impl Compute {
                 name: pre(&d.name),
                 expr: rename(&d.expr),
             }));
+            // An output that passes a substituted input straight through still needs its `{name}__{x}`.
+            for o in &c.outputs {
+                if let Some((_, e)) = subst.iter().find(|(s, _)| *s == o.name) {
+                    flat.defs.push(Stmt::Let(Def {
+                        name: pre(&o.name),
+                        expr: e.clone(),
+                    }));
+                }
+            }
             // Encapsulation: this scope reads an instance only through its outputs.
             let own: Vec<&Expr> = self
                 .defs
@@ -618,6 +627,9 @@ impl Compute {
             scope.push((&def.name, t));
         }
         for p in &self.outputs {
+            if bad_range(p.range) {
+                bad.push(format!("output {}: bad range {:?}", p.name, p.range));
+            }
             match scope.iter().rev().find(|(n, _)| *n == p.name) {
                 None => bad.push(format!("output {}: no such def, input or state", p.name)),
                 Some((_, t)) if *t != p.ty || p.ty == Ty::U8 => bad.push(format!(
@@ -812,6 +824,17 @@ mod tests {
                 .iter()
                 .all(|s| !matches!(s, Stmt::Let(d) if d.name == "p__x"))
         );
+    }
+
+    #[test]
+    fn output_that_passes_an_input_through() {
+        let mut l = lib();
+        l[0].compute.outputs.push(port("x"));
+        let mut c = parent("p__out", var("a"));
+        c.defs.push(def("z", var("p__x")).into());
+        let flat = c.flatten(&l).unwrap();
+        assert!(flat.validate().is_empty(), "{:?}", flat.validate());
+        let (_, _) = flat.step(&mut F64, vec![Val::N(3.0)], flat.init(&mut F64));
     }
 
     #[test]
