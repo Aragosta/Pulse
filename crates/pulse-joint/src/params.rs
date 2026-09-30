@@ -21,6 +21,8 @@ pub const LATENCY_TICKS: u32 = 2;
 pub const POS_QUANT: f32 = core::f32::consts::TAU / 4096.0;
 pub const CUR_QUANT: f32 = 0.01;
 pub const TEMP_QUANT: f32 = 0.25;
+/// Current sense full scale: a good current sample is within +-this. A bad one may be anything (NaN, inf).
+pub const I_SENSE_MAX: f32 = 64.0;
 pub const DROPOUT_P: f32 = 0.02;
 pub const MAX_DROPOUT_RUN: u32 = 3;
 

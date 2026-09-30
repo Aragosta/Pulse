@@ -2,7 +2,7 @@
 //! `copperconfig.ron` and `pulse_joint::generated` are generated from it.
 
 use crate::params::*;
-use pulse_ir::expr::{Compute, Def, Expr, Port, Ty, num, select, var};
+use pulse_ir::expr::{Compute, Def, Expr, Port, StateVar, Ty, num, select, var};
 use pulse_ir::{Block, Edge, Formalism::*, Hold, IR_VERSION, Ir, SensorSpec};
 
 fn def(name: &str, expr: Expr) -> Def {
@@ -17,6 +17,7 @@ fn port(name: &str, ty: Ty, unit: &str, range: Option<[f64; 2]>) -> Port {
         ty,
         unit: Some(unit.into()),
         range,
+        glitch: false,
     }
 }
 
@@ -34,13 +35,21 @@ struct Pid {
     hi: f64,
 }
 impl Pid {
-    fn state() -> Vec<Def> {
+    /// Invariants proved by `class3`: the integral within the output limits, the stored measurement within
+    /// `meas_max`, the filtered derivative within what that measurement range allows (+ margin).
+    fn state(&self, meas_max: f64) -> Vec<StateVar> {
+        let sv = |name: &str, init: Expr, range: Option<[f64; 2]>| StateVar {
+            name: name.into(),
+            init,
+            range,
+        };
+        let d_max = 2.0 * (2.0 * meas_max / self.dt);
         vec![
-            def("integral", num(0.0)),
-            def("prev_meas", num(0.0)),
-            def("has_prev", Expr::Bool(false)),
-            def("filt", num(0.0)),
-            def("filt_init", Expr::Bool(false)),
+            sv("integral", num(0.0), Some([self.lo, self.hi])),
+            sv("prev_meas", num(0.0), Some([-meas_max, meas_max])),
+            sv("has_prev", Expr::Bool(false), None),
+            sv("filt", num(0.0), Some([-d_max, d_max])),
+            sv("filt_init", Expr::Bool(false), None),
         ]
     }
     fn update(&self, setpoint: Expr, measured: Expr, reset: Expr) -> (Vec<Def>, Vec<Def>) {
@@ -80,9 +89,16 @@ impl Pid {
         ];
         let or_reset = |e: Expr| select(var("reset"), num(0.0), e);
         let next = vec![
+            // Conditional integration already keeps the integral inside the output limits (it only grows while the
+            // output is unsaturated), so on finite inputs this clamp never acts. Intervals cannot see that relation;
+            // the clamp states it, and the invariant becomes provable.
             def(
                 "integral",
-                or_reset(select(var("deeper"), var("integral"), var("cand"))),
+                or_reset(
+                    select(var("deeper"), var("integral"), var("cand"))
+                        .max(num(self.lo))
+                        .min(num(self.hi)),
+                ),
             ),
             def("prev_meas", or_reset(measured)),
             def("has_prev", var("reset").not()),
@@ -101,6 +117,7 @@ pub fn current_loop() -> Compute {
         num(0.0),
     );
     let clamp = var("wanted").max(-var("lim")).min(var("lim"));
+    let meas_max = I_SENSE_MAX as f64;
     let pid = Pid {
         kp: CUR_KP as f64,
         ki: CUR_KI as f64,
@@ -112,7 +129,7 @@ pub fn current_loop() -> Compute {
     };
     let (pid_defs, next) = pid.update(
         var("setpoint"),
-        var("measured"),
+        var("meas"),
         var("state").eq(num(pulse_joint::FAULT as f64)),
     );
     let mut defs = vec![
@@ -121,17 +138,30 @@ pub fn current_loop() -> Compute {
             "setpoint",
             select(var("wanted").is_finite(), clamp, num(0.0)),
         ),
+        // A bad current sample (NaN, inf) is replaced by the last good one before anything uses it, so it cannot
+        // reach the controller's state and latch the output (the hand-written loop latched at -24 V).
+        def(
+            "meas",
+            select(
+                var("measured").is_finite(),
+                var("measured"),
+                var("prev_meas"),
+            ),
+        ),
     ];
     defs.extend(pid_defs);
     defs.push(def("volts", select(var("reset"), num(0.0), var("pid_out"))));
     Compute {
         inputs: vec![
             port("wanted", Ty::F32, "A", None),
-            port("measured", Ty::F32, "A", None),
+            Port {
+                glitch: true,
+                ..port("measured", Ty::F32, "A", Some([-meas_max, meas_max]))
+            },
             port("scale", Ty::F32, "1", None),
             port("state", Ty::U8, "thermal state", None),
         ],
-        state: Pid::state(),
+        state: pid.state(meas_max),
         defs,
         outputs: vec![
             port("volts", Ty::F32, "V", Some([-V_BUS as f64, V_BUS as f64])),

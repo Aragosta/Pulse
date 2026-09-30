@@ -1,5 +1,5 @@
-//! Class 3 (first check): output ranges proved by interval arithmetic over every input the contract allows and
-//! every state value, NaN and infinities included. Sound for the f32 firmware: each bound is rounded outward to f32,
+//! Class 3 (first checks): state invariants and output ranges, proved by interval arithmetic over every input the
+//! contract allows, NaN and infinities included. Sound for the f32 firmware: each bound is rounded outward to f32,
 //! so it contains what the chip computes, not what exact arithmetic would.
 
 use crate::expr::{Cmp, Compute, Domain, Env, Expr, Op, Ty, V, Val};
@@ -67,7 +67,11 @@ impl Iv {
     }
 }
 
-pub struct Intervals;
+/// `finite`: for inputs that may glitch, the range of their finite samples, so `is_finite(x)` narrows `x` back to it.
+#[derive(Default)]
+pub struct Intervals {
+    finite: Vec<(String, Iv)>,
+}
 
 impl Domain for Intervals {
     type N = Iv;
@@ -227,14 +231,24 @@ impl Domain for Intervals {
     fn assume(&mut self, cond: &Expr, holds: bool, env: &Env<Self>) -> Option<Env<Self>> {
         let (name, refine): (&str, Box<dyn Fn(Iv) -> Iv>) = match cond {
             Expr::IsFinite(x) => match (&**x, holds) {
-                (Expr::Var(n), true) => (
-                    n,
-                    Box::new(|a: Iv| Iv {
-                        lo: a.lo.max(-(f32::MAX as f64)),
-                        hi: a.hi.min(f32::MAX as f64),
-                        nan: false,
-                    }),
-                ),
+                (Expr::Var(n), true) => {
+                    let fin = self.finite.iter().find(|(f, _)| f == n).map_or(
+                        Iv {
+                            lo: -(f32::MAX as f64),
+                            hi: f32::MAX as f64,
+                            nan: false,
+                        },
+                        |(_, iv)| *iv,
+                    );
+                    (
+                        n,
+                        Box::new(move |a: Iv| Iv {
+                            lo: a.lo.max(fin.lo),
+                            hi: a.hi.min(fin.hi),
+                            nan: false,
+                        }),
+                    )
+                }
                 _ => return None,
             },
             Expr::Lt(x, y) | Expr::Le(x, y) | Expr::Gt(x, y) | Expr::Ge(x, y) => {
@@ -276,60 +290,82 @@ impl Domain for Intervals {
     }
 }
 
-/// The interval every input may take under its contract, and every state value may take at all.
+/// One firing over every input the contracts allow and every state inside its invariant range (unranged state:
+/// anything, NaN included).
 pub fn step_intervals(c: &Compute) -> (Vec<V<Intervals>>, Vec<V<Intervals>>) {
+    let mut d = Intervals::default();
+    let range = |[lo, hi]: [f64; 2]| Iv {
+        lo: down(lo),
+        hi: up(hi),
+        nan: false,
+    };
     let inputs = c
         .inputs
         .iter()
         .map(|p| match (p.ty, p.range) {
             (Ty::Bool, _) => Val::B(Bv { t: true, f: true }),
-            (_, Some([lo, hi])) => Val::N(Iv {
-                lo: down(lo),
-                hi: up(hi),
-                nan: false,
-            }),
-            (Ty::U8, None) => Val::N(Iv {
-                lo: 0.0,
-                hi: 255.0,
-                nan: false,
-            }),
+            (_, Some(r)) if p.glitch => {
+                d.finite.push((p.name.clone(), range(r)));
+                Val::N(ANY)
+            }
+            (_, Some(r)) => Val::N(range(r)),
+            (Ty::U8, None) => Val::N(range([0.0, 255.0])),
             (Ty::F32, None) => Val::N(ANY),
         })
         .collect();
     let state = c
-        .init(&mut Intervals)
+        .init(&mut d)
         .into_iter()
-        .map(|v| match v {
-            Val::N(_) => Val::N(ANY),
-            Val::B(_) => Val::B(Bv { t: true, f: true }),
+        .zip(&c.state)
+        .map(|(v, s)| match (v, s.range) {
+            (Val::B(_), _) => Val::B(Bv { t: true, f: true }),
+            (Val::N(_), Some(r)) => Val::N(range(r)),
+            (Val::N(_), None) => Val::N(ANY),
         })
         .collect();
-    c.step(&mut Intervals, inputs, state)
+    c.step(&mut d, inputs, state)
 }
 
-/// `C3-RANGE`: every output with a declared range stays inside it and is never NaN, for every allowed input and
-/// every state (so it holds on every firing, whatever happened before).
+fn outside(iv: Iv, [lo, hi]: [f64; 2]) -> Option<String> {
+    (iv.nan || (!iv.empty() && (iv.lo < lo || iv.hi > hi))).then(|| {
+        format!(
+            "can be [{}, {}]{} outside [{lo}, {hi}]",
+            iv.lo,
+            iv.hi,
+            if iv.nan { " or NaN" } else { "" }
+        )
+    })
+}
+
+/// `C3-INVARIANT`: every state range holds initially, and one firing from inside all of them (any allowed input)
+/// stays inside, so by induction it holds on every firing. `C3-RANGE`: under those invariants every output stays
+/// inside its declared range and is never NaN.
 pub fn check(ir: &Ir) -> Vec<Violation> {
     let mut bad = Vec::new();
     for blk in &ir.blocks {
         let Some(c) = &blk.compute else { continue };
-        let (outs, _) = step_intervals(c);
-        for (p, o) in c.outputs.iter().zip(outs) {
-            let (Some([lo, hi]), Val::N(iv)) = (p.range, o) else {
+        let (outs, next) = step_intervals(c);
+        let init = c.init(&mut Intervals::default());
+        for ((s, n), i) in c.state.iter().zip(next).zip(init) {
+            let (Some(r), Val::N(n), Val::N(i)) = (s.range, n, i) else {
                 continue;
             };
-            if iv.nan || (!iv.empty() && (iv.lo < lo || iv.hi > hi)) {
+            for (when, iv) in [("initially", i), ("after a firing", n)] {
+                if let Some(why) = outside(iv, r) {
+                    let msg = format!("{}.{} {when} {why}", blk.id, s.name);
+                    bad.push(v("invariant", "C3-INVARIANT", msg));
+                }
+            }
+        }
+        for (p, o) in c.outputs.iter().zip(outs) {
+            let (Some(r), Val::N(iv)) = (p.range, o) else {
+                continue;
+            };
+            if let Some(why) = outside(iv, r) {
                 bad.push(v(
                     "range",
                     "C3-RANGE",
-                    format!(
-                        "{}.{}: can be [{}, {}]{} outside declared [{lo}, {hi}]",
-                        blk.id,
-                        p.name,
-                        iv.lo,
-                        iv.hi,
-                        if iv.nan { " or NaN" } else { "" }
-                    ),
+                    format!("{}.{} {why}", blk.id, p.name),
                 ));
             }
         }
@@ -346,7 +382,7 @@ mod tests {
         Iv { lo, hi, nan: false }
     }
     fn op(o: Op, a: Iv, b: Iv) -> Iv {
-        Intervals.op(o, a, b)
+        Intervals::default().op(o, a, b)
     }
 
     /// Every interval result must contain the f32 result for sampled points of its inputs.
@@ -439,6 +475,7 @@ mod tests {
                     ty: Ty::F32,
                     unit: None,
                     range: None,
+                    glitch: false,
                 })
                 .into(),
             state: vec![],
@@ -461,6 +498,7 @@ mod tests {
                 ty: Ty::F32,
                 unit: Some("A".into()),
                 range: Some([-8.0, 8.0]),
+                glitch: false,
             }],
             next: vec![],
         }

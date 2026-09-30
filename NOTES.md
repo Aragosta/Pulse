@@ -20,6 +20,10 @@ Facts are marked **verified** (checked against a source, linked) or **unverified
 
 **Finding (hand-written firmware, reproduced faithfully).** One NaN current sample latches the output at -24 V (full reverse) until a thermal fault: the NaN enters the derivative filter state and stays (0 * NaN = NaN even with KD = 0), and `f32::max` maps the NaN sum to the lower rail. The range proof passes because -24 V is in range; the missing property is "a bad sample does not latch", a multi-step property. Fix in the model once there is a check that states it.
 
+**Fixed (2026-09-30): the NaN latch.** New check `C3-INVARIANT`: state variables declare a range; it must hold initially, and one firing from inside every range (any input the contracts allow) must stay inside, so it holds forever by induction. Inputs can be declared `glitch` (good samples within `range`, bad ones NaN/inf). Declaring the current loop's invariants on the unfixed model failed on `integral`, `prev_meas` and `filt`. The fix is in the model, not in Rust: a bad current sample is replaced by the last good one before use. The integral also gets an explicit clamp to the output limits: conditional integration already guarantees it (the clamp never acts: bit-identical to `CurrentCtl` over 400k steps), but intervals cannot see that relation (without the clamp they bound it at +-35.3 V). Removing either half is caught. The hand-written `CurrentCtl` is now only a test oracle, fed the substituted stream.
+
+Limits of this proof: intervals are non-relational, so invariants that depend on a relation between variables need it stated (as the clamp does). The current sense contract (+-64 A) is declared, not checked at runtime; the sim stays well inside it (the loop limits current to 8 A; 24 V / 0.5 ohm = 48 A is the physical ceiling).
+
 **Next.** Thermal FSM as data (states/guards/transitions; reachable, deterministic, total), then the position loop, then split I/O from environment blocks and generate `tasks.rs`; NN block with an interval-bound output envelope.
 
 ### D-006: What the IR is for, and its shape (Proposed, 2026-09-29)
@@ -149,7 +153,7 @@ Python is a compile-time authoring layer only, never linked into the binary (Pyt
 - [x] Expression language + typed ports in the IR; current loop generated from it and running (D-007)
 - [ ] Generate task glue from the IR (needs FSM as data)
 - [ ] IR: FSM as data; I/O vs environment blocks; NN block
-- [ ] Fix the NaN latch in the current loop's derivative filter, with a check that a bad sample cannot latch (D-007)
+- [x] Fix the NaN latch in the current loop, with `C3-INVARIANT` proving a bad sample cannot latch (D-007)
 - [ ] JSON Schema for the IR (`schemars`) and the MCP server, when a frontend or agent consumes the file
 - [ ] Add "Frontend" section to `README.md` (D-004)
 - [ ] Structural Coverage and Symbolic Proof on the single-joint example (only after Class 1 is solid, per the README)

@@ -71,7 +71,7 @@ fn main() {
     // Class 3, static: output ranges of every block whose behaviour is in the IR.
     let range_violations = pulse_ir::class3::check(&ir);
     if !range_violations.is_empty() {
-        eprintln!("Class 3 (output ranges): REFUSING TO RUN");
+        eprintln!("Class 3 (state invariants, output ranges): REFUSING TO RUN");
         for v in range_violations {
             eprintln!("  [FAIL] {} ({}): {}", v.check, v.code, v.msg);
         }
@@ -139,6 +139,17 @@ fn main() {
             "  [PASS] output ranges     {}: {} for every input incl. NaN/inf (interval proof)",
             b.id,
             ranges.join(", ")
+        );
+        let held: Vec<&str> = c
+            .state
+            .iter()
+            .filter(|s| s.range.is_some())
+            .map(|s| s.name.as_str())
+            .collect();
+        println!(
+            "  [PASS] state invariants  {}: {} stay in range on every firing, so a bad sample cannot latch",
+            b.id,
+            held.join(", ")
         );
     }
     println!(

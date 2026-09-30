@@ -30,9 +30,10 @@ impl CurrentLoop {
         let v_state = v_state as f32;
         let v_lim = (if (v_scale >= 0.0_f32) { (8.0_f32 * v_scale.min(1.0_f32)) } else { 0.0_f32 });
         let v_setpoint = (if v_wanted.is_finite() { v_wanted.max((-v_lim)).min(v_lim) } else { 0.0_f32 });
-        let v_error = (v_setpoint - v_measured);
+        let v_meas = (if v_measured.is_finite() { v_measured } else { self.prev_meas });
+        let v_error = (v_setpoint - v_meas);
         let v_p_term = (1.26_f32 * v_error);
-        let v_raw_d = (if self.has_prev { ((self.prev_meas - v_measured) / 0.000125_f32) } else { 0.0_f32 });
+        let v_raw_d = (if self.has_prev { ((self.prev_meas - v_meas) / 0.000125_f32) } else { 0.0_f32 });
         let v_filt_d = (if self.filt_init { ((1.0_f32 * v_raw_d) + ((1.0_f32 - 1.0_f32) * self.filt)) } else { v_raw_d });
         let v_d_term = (0.0_f32 * v_filt_d);
         let v_cand = (self.integral + ((1257.0_f32 * v_error) * 0.000125_f32));
@@ -41,8 +42,8 @@ impl CurrentLoop {
         let v_deeper = (((v_unsat > 24.0_f32) && (v_error > 0.0_f32)) || ((v_unsat < (-24.0_f32)) && (v_error < 0.0_f32)));
         let v_reset = (v_state == 2.0_f32);
         let v_volts = (if v_reset { 0.0_f32 } else { v_pid_out });
-        let n_integral = (if v_reset { 0.0_f32 } else { (if v_deeper { self.integral } else { v_cand }) });
-        let n_prev_meas = (if v_reset { 0.0_f32 } else { v_measured });
+        let n_integral = (if v_reset { 0.0_f32 } else { (if v_deeper { self.integral } else { v_cand }).max((-24.0_f32)).min(24.0_f32) });
+        let n_prev_meas = (if v_reset { 0.0_f32 } else { v_meas });
         let n_has_prev = (!v_reset);
         let n_filt = (if v_reset { 0.0_f32 } else { v_filt_d });
         let n_filt_init = (!v_reset);

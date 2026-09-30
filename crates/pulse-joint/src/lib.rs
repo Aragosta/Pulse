@@ -268,8 +268,9 @@ mod tests {
         );
     }
 
-    /// The firmware generated from the IR is bit-identical to this hand-written controller, including NaN,
-    /// infinities, rail saturation and fault resets. The hand-written one stays as the oracle until it is retired.
+    /// The firmware generated from the IR is this hand-written controller plus one fix: a bad current sample (NaN,
+    /// inf) is replaced by the last good one, so it cannot latch the output. So the hand-written controller fed that
+    /// substituted stream must match it bit for bit, including infinities, rail saturation and fault resets.
     #[test]
     fn generated_current_loop_matches_hand_written() {
         let mut rng = Pcg32::new(7);
@@ -295,12 +296,15 @@ mod tests {
         for run in 0..200 {
             let (mut hand, mut generated) =
                 (CurrentCtl::new().unwrap(), generated::CurrentLoop::new());
+            let mut last_good = 0.0; // what the generated loop substitutes; reset to 0 on fault like its state
             for i in 0..2000 {
                 let (w, m) = (pick(&mut rng, &odd), pick(&mut rng, &odd));
                 let s = pick(&mut rng, &[f32::NAN, -1.0, 0.0, DERATE_SCALE, 1.0, 2.0]);
                 let state = [NOMINAL, NOMINAL, NOMINAL, DERATING, FAULT]
                     [(rng.next_unit() * 5.0) as usize % 5];
-                let want = hand.update(w, m, s, state);
+                let fed = if m.is_finite() { m } else { last_good };
+                last_good = if state == FAULT { 0.0 } else { fed };
+                let want = hand.update(w, fed, s, state);
                 let got = generated.step(w, m, s, state);
                 assert!(
                     got.0.to_bits() == want.volts.to_bits()
@@ -311,5 +315,14 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The latch the hand-written loop had: one NaN current sample drove it to -24 V until a fault.
+    #[test]
+    fn one_bad_current_sample_does_not_latch() {
+        let mut c = generated::CurrentLoop::new();
+        let volts: [f32; 6] =
+            [0.0, 0.0, f32::NAN, 0.0, 0.0, 0.0].map(|m| c.step(1.0, m, 1.0, NOMINAL).0);
+        assert!(volts.iter().all(|v| (0.0..24.0).contains(v)), "{volts:?}");
     }
 }

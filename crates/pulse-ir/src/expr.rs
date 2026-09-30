@@ -50,6 +50,24 @@ pub struct Port {
     pub unit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range: Option<[f64; 2]>,
+    /// Input only: besides `range`, a sample may be NaN or +-inf (a bad reading) that the block must guard.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub glitch: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// A state variable: its initial value (a `Num` or `Bool` literal) and, optionally, an invariant range that
+/// `class3` proves inductively (it holds initially, and one firing from inside every range stays inside).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StateVar {
+    pub name: String,
+    pub init: Expr,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<[f64; 2]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -65,8 +83,7 @@ pub struct Def {
 #[serde(deny_unknown_fields)]
 pub struct Compute {
     pub inputs: Vec<Port>,
-    /// Initial values: `Num` or `Bool` literals.
-    pub state: Vec<Def>,
+    pub state: Vec<StateVar>,
     pub defs: Vec<Def>,
     pub outputs: Vec<Port>,
     pub next: Vec<Def>,
@@ -348,7 +365,7 @@ impl Compute {
     pub fn init<D: Domain>(&self, d: &mut D) -> Vec<V<D>> {
         self.state
             .iter()
-            .map(|s| s.expr.eval(d, &Vec::new()))
+            .map(|s| s.init.eval(d, &Vec::new()))
             .collect()
     }
 
@@ -369,14 +386,15 @@ impl Compute {
         for p in &self.inputs {
             let t = declare(&mut scope, &p.name, p.ty, &mut bad);
             scope.push((&p.name, t));
-            if p.range
-                .is_some_and(|[lo, hi]| lo.is_nan() || hi.is_nan() || lo > hi)
-            {
+            if bad_range(p.range) {
                 bad.push(format!("input {}: bad range {:?}", p.name, p.range));
             }
         }
         for s in &self.state {
-            let t = match s.expr {
+            if bad_range(s.range) {
+                bad.push(format!("state {}: bad range {:?}", s.name, s.range));
+            }
+            let t = match s.init {
                 Expr::Num(_) => Ty::F32,
                 Expr::Bool(_) => Ty::Bool,
                 _ => {
@@ -428,6 +446,10 @@ impl Compute {
         }
         bad
     }
+}
+
+fn bad_range(r: Option<[f64; 2]>) -> bool {
+    r.is_some_and(|[lo, hi]| lo.is_nan() || hi.is_nan() || lo > hi)
 }
 
 // ---- concrete arithmetic: f32 (the firmware) and f64 (the model) ----------------------------------------------------
