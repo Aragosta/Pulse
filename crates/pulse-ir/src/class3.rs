@@ -2,7 +2,7 @@
 //! contract allows, NaN and infinities included. Sound for the f32 firmware: each bound is rounded outward to f32,
 //! so it contains what the chip computes, not what exact arithmetic would.
 
-use crate::expr::{Cmp, Compute, Domain, Env, Expr, Op, Ty, V, Val};
+use crate::expr::{Cmp, Compute, Def, Domain, Env, Expr, Op, Port, Ty, V, Val};
 use crate::{Ir, Violation, v};
 
 /// A set of f32 values: `[lo, hi]` (empty when `lo > hi`, infinities allowed), plus NaN if `nan`.
@@ -339,20 +339,11 @@ fn outside(iv: Iv, [lo, hi]: [f64; 2]) -> Option<String> {
     })
 }
 
-/// `C3-INVARIANT`: every state range holds initially, and one firing from inside all of them (any allowed input)
-/// stays inside, so by induction it holds on every firing. `C3-RANGE`: under those invariants every declared output
-/// range holds and is never NaN. Proved on the whole firmware (`graph::firmware`), so inputs between blocks carry
-/// what their producers are proved to output.
-pub fn check(ir: &Ir) -> Vec<Violation> {
-    let fw = match crate::graph::firmware(ir) {
-        Ok(fw) => fw,
-        Err(es) => return es.into_iter().map(|e| v("graph", "IR-GRAPH", e)).collect(),
-    };
-    let mut c = fw.compute;
-    let boundary = c.outputs.len();
-    c.outputs.extend(fw.probes);
+/// Invariants and output ranges of one flat compute, for every input its contracts allow. `from` is how many
+/// outputs are its own (the rest are probes of inner block outputs); `at` prefixes every message.
+fn prove(c: &Compute, own: usize, at: &str) -> Vec<Violation> {
     let mut bad = Vec::new();
-    let (outs, next) = step_intervals(&c);
+    let (outs, next) = step_intervals(c);
     let init = c.init(&mut Intervals::default());
     for ((s, n), i) in c.state.iter().zip(next).zip(init) {
         let (Some(r), Val::N(n), Val::N(i)) = (s.range, n, i) else {
@@ -360,11 +351,8 @@ pub fn check(ir: &Ir) -> Vec<Violation> {
         };
         for (when, iv) in [("initially", i), ("after a firing", n)] {
             if let Some(why) = outside(iv, r) {
-                bad.push(v(
-                    "invariant",
-                    "C3-INVARIANT",
-                    format!("{} {when} {why}", s.name),
-                ));
+                let msg = format!("{at}{} {when} {why}", s.name);
+                bad.push(v("invariant", "C3-INVARIANT", msg));
             }
         }
     }
@@ -373,12 +361,113 @@ pub fn check(ir: &Ir) -> Vec<Violation> {
             continue;
         };
         if let Some(why) = outside(iv, r) {
-            let what = if k < boundary {
-                "output"
+            let what = if k < own { "output" } else { "block output" };
+            bad.push(v(
+                "range",
+                "C3-RANGE",
+                format!("{at}{what} {} {why}", p.name),
+            ));
+        }
+    }
+    bad
+}
+
+/// Whether a bound value meets a component input's contract. Without `glitch`: never NaN, inside the range. With
+/// it: the good (finite) samples inside the range; a value whose finite part is unknown to intervals (a glitchy
+/// input) meets it when it is that input and its own contract is inside.
+fn breaks(iv: Iv, value: &Expr, contract: &Port, glitchy: &[(String, Iv)]) -> Option<String> {
+    let [lo, hi] = contract.range?;
+    let inside = |a: Iv| a.empty() || (a.lo >= down(lo) && a.hi <= up(hi));
+    let ok = if !contract.glitch {
+        !iv.nan && inside(iv)
+    } else {
+        inside(Iv { nan: false, ..iv })
+            || matches!(value, Expr::Var(n) if glitchy.iter().any(|(g, fin)| g == n && inside(*fin)))
+    };
+    (!ok).then(|| {
+        format!(
+            "can be [{}, {}]{}, outside the contract {}[{lo}, {hi}]",
+            iv.lo,
+            iv.hi,
+            if iv.nan { " or NaN" } else { "" },
+            if contract.glitch {
+                "for good samples "
             } else {
-                "block output"
-            };
-            bad.push(v("range", "C3-RANGE", format!("{what} {} {why}", p.name)));
+                ""
+            }
+        )
+    })
+}
+
+/// `C3-INVARIANT`: every state range holds initially, and one firing from inside all of them (any allowed input)
+/// stays inside, so by induction it holds on every firing. `C3-RANGE`: under those invariants every declared output
+/// range holds and is never NaN. `C3-CONTRACT`: every component instance is fed what its component assumes.
+///
+/// Each component is proved once, on its own, under its input contracts; the whole firmware (`graph::firmware`) is
+/// then proved with inputs between blocks carrying what their producers are proved to output, and every instance's
+/// bound inputs are checked against its component's contracts, so each component's own proof applies to it.
+pub fn check(ir: &Ir) -> Vec<Violation> {
+    let mut bad = Vec::new();
+    for comp in &ir.components {
+        if let Ok(c) = ir.flat(&comp.compute) {
+            bad.extend(prove(
+                &c,
+                c.outputs.len(),
+                &format!("component {}: ", comp.name),
+            ));
+        }
+    }
+    let fw = match crate::graph::firmware(ir) {
+        Ok(fw) => fw,
+        Err(es) => {
+            bad.extend(es.into_iter().map(|e| v("graph", "IR-GRAPH", e)));
+            return bad;
+        }
+    };
+    let mut c = fw.compute;
+    let own = c.outputs.len();
+    c.outputs.extend(fw.probes);
+    // Each obligation's bound value becomes a probe, so the same interval pass yields it.
+    let first = c.outputs.len();
+    for (i, o) in fw.obligations.iter().enumerate() {
+        let name = format!("__obligation_{i}");
+        c.defs.push(
+            Def {
+                name: name.clone(),
+                expr: o.value.clone(),
+            }
+            .into(),
+        );
+        c.outputs.push(Port {
+            name,
+            range: None,
+            glitch: false,
+            ..o.contract.clone()
+        });
+    }
+    bad.extend(prove(&c, own, ""));
+    let glitchy: Vec<(String, Iv)> = c
+        .inputs
+        .iter()
+        .filter(|p| p.glitch)
+        .filter_map(|p| {
+            Some((
+                p.name.clone(),
+                Iv {
+                    lo: down(p.range?[0]),
+                    hi: up(p.range?[1]),
+                    nan: false,
+                },
+            ))
+        })
+        .collect();
+    let (outs, _) = step_intervals(&c);
+    for (o, val) in fw.obligations.iter().zip(&outs[first..]) {
+        if let Val::N(iv) = val
+            && let Some(why) = breaks(*iv, &o.value, &o.contract, &glitchy)
+        {
+            let msg = format!("{} ({}): {why}", o.at, o.component);
+            bad.push(v("contract", "C3-CONTRACT", msg));
         }
     }
     bad

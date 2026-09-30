@@ -127,6 +127,17 @@ pub struct Compute {
     pub next: Vec<Def>,
 }
 
+/// What one instance must satisfy: the value bound to a contracted input (in the flat namespace) must meet the
+/// component's contract, so the component's own proof, made under that contract, applies to this instance.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Obligation {
+    /// `instance.input` (nested instances: `outer.inner.input`).
+    pub at: String,
+    pub component: String,
+    pub contract: Port,
+    pub value: Expr,
+}
+
 /// A reusable piece of behaviour (e.g. a PID), instantiated by `Stmt::Use`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -454,10 +465,23 @@ impl Compute {
     /// Inline every component instance (recursively), prefixing its names with `{instance}__`. Everything that
     /// evaluates, proves or generates code works on the flat form. User names must not contain `__`.
     pub fn flatten(&self, lib: &[Component]) -> Result<Compute, String> {
+        self.flatten_at(lib, 0).map(|(c, _)| c)
+    }
+
+    /// `flatten`, plus what every instance must satisfy: each bound input against its component's input contract,
+    /// with the bound value as an expression in the flat namespace (`class3` proves these).
+    pub fn flatten_obligations(
+        &self,
+        lib: &[Component],
+    ) -> Result<(Compute, Vec<Obligation>), String> {
         self.flatten_at(lib, 0)
     }
 
-    fn flatten_at(&self, lib: &[Component], depth: usize) -> Result<Compute, String> {
+    fn flatten_at(
+        &self,
+        lib: &[Component],
+        depth: usize,
+    ) -> Result<(Compute, Vec<Obligation>), String> {
         if depth > 16 {
             return Err("components nested more than 16 deep (a component uses itself?)".into());
         }
@@ -465,6 +489,7 @@ impl Compute {
             defs: Vec::new(),
             ..self.clone()
         };
+        let mut obligations = Vec::new();
         for stmt in &self.defs {
             let u = match stmt {
                 Stmt::Let(d) => {
@@ -485,7 +510,7 @@ impl Compute {
                 .iter()
                 .find(|c| c.name == u.component)
                 .ok_or(format!("{}: no component {:?}", u.name, u.component))?;
-            let c = comp.compute.flatten_at(lib, depth + 1)?;
+            let (c, inner) = comp.compute.flatten_at(lib, depth + 1)?;
             let pre = |n: &str| format!("{}__{n}", u.name);
             // An input bound to a variable or literal is substituted where it is used (no copy, so a contract on
             // that variable still reaches the proof); any other binding becomes a def where the instance stands.
@@ -511,6 +536,24 @@ impl Compute {
                     None => var(&pre(n)),
                 })
             };
+            // Each contracted input, as bound here; and the component's own instances' obligations, renamed.
+            for p in c.inputs.iter().filter(|p| p.range.is_some()) {
+                let value = subst
+                    .iter()
+                    .find(|(s, _)| *s == p.name)
+                    .map_or(var(&pre(&p.name)), |(_, e)| e.clone());
+                obligations.push(Obligation {
+                    at: format!("{}.{}", u.name, p.name),
+                    component: u.component.clone(),
+                    contract: p.clone(),
+                    value,
+                });
+            }
+            obligations.extend(inner.into_iter().map(|o| Obligation {
+                at: format!("{}.{}", u.name, o.at),
+                value: rename(&o.value),
+                ..o
+            }));
             if let Some(b) = u
                 .bind
                 .iter()
@@ -574,7 +617,7 @@ impl Compute {
                 }
             }
         }
-        Ok(flat)
+        Ok((flat, obligations))
     }
 
     /// Initial state, in the order of `self.state`.

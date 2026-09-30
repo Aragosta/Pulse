@@ -17,6 +17,8 @@ pub struct Firmware {
     /// Every block output, exposed as `{block}__{port}__now` with that port's declared range: proof obligations
     /// that are not firmware outputs.
     pub probes: Vec<Port>,
+    /// Every component instance's bound inputs against the component's contracts, in this namespace.
+    pub obligations: Vec<crate::expr::Obligation>,
 }
 
 fn port_name(block: &str, port: &Option<String>) -> String {
@@ -31,9 +33,18 @@ pub fn firmware(ir: &Ir) -> Result<Firmware, Vec<String>> {
     let is_fw = |id: &str| ir.block(id).is_some_and(|b| b.compute.is_some());
     let blocks: Vec<_> = ir.blocks.iter().filter(|b| b.compute.is_some()).collect();
     let mut flat = Vec::new();
+    let mut block_obligations = Vec::new();
     for b in &blocks {
-        match ir.flat(b.compute.as_ref().unwrap()) {
-            Ok(c) => flat.push(c),
+        match b
+            .compute
+            .as_ref()
+            .unwrap()
+            .flatten_obligations(&ir.components)
+        {
+            Ok((c, o)) => {
+                flat.push(c);
+                block_obligations.push(o);
+            }
             Err(e) => bad.push(format!("{}: {e}", b.id)),
         }
     }
@@ -216,6 +227,7 @@ pub fn firmware(ir: &Ir) -> Result<Firmware, Vec<String>> {
     }
 
     let mut probes = Vec::new();
+    let mut obligations = Vec::new();
     for &i in &order {
         let (b, c) = (blocks[i], &flat[i]);
         let p = period(b.rate_hz).unwrap();
@@ -247,6 +259,15 @@ pub fn firmware(ir: &Ir) -> Result<Firmware, Vec<String>> {
                 }
             })
         };
+        obligations.extend(
+            block_obligations[i]
+                .iter()
+                .map(|o| crate::expr::Obligation {
+                    at: format!("{}.{}", b.id, o.at),
+                    value: rename(&o.value),
+                    ..o.clone()
+                }),
+        );
         fw.params
             .extend(c.params.iter().map(|x| crate::expr::Param {
                 name: pre(&x.name),
@@ -345,6 +366,7 @@ pub fn firmware(ir: &Ir) -> Result<Firmware, Vec<String>> {
         Ok(Firmware {
             compute: fw,
             probes,
+            obligations,
         })
     } else {
         Err(bad)
@@ -495,6 +517,80 @@ mod tests {
             components: vec![],
         };
         assert_eq!(crate::class3::check(&ir), vec![]);
+    }
+
+    /// A component assuming its input is in [0, 1] (never NaN) is fed an outside input declared [0, 1] (fine), then
+    /// one declared [0, 2] (refused at the instance).
+    #[test]
+    fn instance_obligation_for_a_plain_range_contract() {
+        use crate::expr::{Component, Use};
+        let half = Component {
+            name: "half".into(),
+            compute: Compute {
+                inputs: vec![Port {
+                    range: Some([0.0, 1.0]),
+                    ..port("x")
+                }],
+                params: vec![],
+                state: vec![],
+                defs: vec![
+                    Def {
+                        name: "y".into(),
+                        expr: var("x") * num(0.5),
+                    }
+                    .into(),
+                ],
+                outputs: vec![port("y")],
+                next: vec![],
+            },
+        };
+        let user = |lo: f64, hi: f64| Compute {
+            inputs: vec![Port {
+                range: Some([lo, hi]),
+                ..port("a")
+            }],
+            params: vec![],
+            state: vec![],
+            defs: vec![
+                Stmt::Use(Use {
+                    name: "h".into(),
+                    component: "half".into(),
+                    bind: vec![Def {
+                        name: "x".into(),
+                        expr: var("a"),
+                    }],
+                }),
+                Def {
+                    name: "b".into(),
+                    expr: var("h__y"),
+                }
+                .into(),
+            ],
+            outputs: vec![port("b")],
+            next: vec![],
+        };
+        let ir = |hi| Ir {
+            version: IR_VERSION,
+            base_rate_hz: 8,
+            blocks: vec![
+                block("src", 8, None),
+                block("u", 8, Some(user(0.0, hi))),
+                block("out", 8, None),
+            ],
+            edges: vec![
+                edge("src", "a", "u", "a", None),
+                edge("u", "b", "out", "b", None),
+            ],
+            components: vec![half.clone()],
+        };
+        assert_eq!(crate::class3::check(&ir(1.0)), vec![]);
+        let bad = crate::class3::check(&ir(2.0));
+        assert!(
+            bad.len() == 1
+                && bad[0].code == "C3-CONTRACT"
+                && bad[0].msg.starts_with("u.h.x (half)"),
+            "{bad:?}"
+        );
     }
 
     #[test]

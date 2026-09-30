@@ -698,6 +698,67 @@ mod tests {
         );
     }
 
+    fn c3(ir: &Ir) -> Vec<String> {
+        pulse_ir::class3::check(ir)
+            .into_iter()
+            .map(|v| format!("{} {}", v.code, v.msg))
+            .collect()
+    }
+
+    /// An instance fed more than its component assumes is refused at the instance: here the position PID is
+    /// declared for angles within +-50 rad, but the sensor may deliver +-100.
+    #[test]
+    fn instance_breaking_its_component_contract_is_refused() {
+        let mut ir = single_joint();
+        let pid = ir
+            .components
+            .iter_mut()
+            .find(|c| c.name == "position_pid")
+            .unwrap();
+        let m = pid
+            .compute
+            .inputs
+            .iter_mut()
+            .find(|p| p.name == "measured")
+            .unwrap();
+        m.range = Some([-50.0, 50.0]);
+        let errs = c3(&ir);
+        assert!(
+            errs.iter()
+                .any(|e| e.starts_with("C3-CONTRACT position_loop.pid.measured")),
+            "{errs:?}"
+        );
+    }
+
+    /// A component is proved on its own, under its contracts: without the integrator clamp the PID fails in
+    /// isolation, named as the component, not only inside some block.
+    #[test]
+    fn component_is_proved_on_its_own() {
+        let mut ir = single_joint();
+        let pid = ir
+            .components
+            .iter_mut()
+            .find(|c| c.name == "current_pid")
+            .unwrap();
+        let n = pid
+            .compute
+            .next
+            .iter_mut()
+            .find(|d| d.name == "integral")
+            .unwrap();
+        n.expr = select(
+            var("reset"),
+            num(0.0),
+            select(var("deeper"), var("integral"), var("cand")),
+        );
+        let errs = c3(&ir);
+        assert!(
+            errs.iter()
+                .any(|e| e.starts_with("C3-INVARIANT component current_pid: integral")),
+            "{errs:?}"
+        );
+    }
+
     /// A state machine with a state no transition can reach is refused, naming the state.
     #[test]
     fn unreachable_fsm_state_is_refused() {

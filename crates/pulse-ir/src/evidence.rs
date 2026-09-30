@@ -64,6 +64,19 @@ pub fn evidence(ir: &Ir) -> Result<Evidence, Vec<Violation>> {
             ));
         }
     }
+    for comp in &ir.components {
+        proved.push(format!(
+            "component {}: invariants and output ranges hold on its own, for every input its contracts allow",
+            comp.name
+        ));
+    }
+    let insts: Vec<&str> = fw.obligations.iter().map(|o| o.at.as_str()).collect();
+    if !insts.is_empty() {
+        proved.push(format!(
+            "every instance is fed what its component assumes: {}",
+            insts.join(", ")
+        ));
+    }
     let computes = ir
         .blocks
         .iter()

@@ -56,6 +56,7 @@ Every numeric port, param and state may carry a unit (`V`, `A`, `V/(A*s)`, `1` f
 - **Ranges are on f32 values**, so a declared range `[lo, hi]` means its f32 hull (the smallest f32 interval containing it).
 - **State invariants** (`C3-INVARIANT`): each ranged state variable is inside its range initially, and one tick taken from inside every range, with any input the contracts allow, lands inside again. By induction it holds on every tick.
 - **Output ranges** (`C3-RANGE`): under those invariants, each ranged output (firmware outputs and every block output) is inside its range and never NaN, on every tick.
+- **Components are proved once** (assume-guarantee): each component's invariants and output ranges are proved on their own, assuming only its input contracts. Every instance must then feed each contracted input a value that meets the contract (`C3-CONTRACT`: never NaN and inside the range; with `glitch`, its good samples inside the range), so the component's own proof applies to that instance. The whole firmware is also proved as one, where inputs between blocks carry what their producers are proved to output.
 - **Timing** (Class 1): rate ratios, holds on every cross-rate read, a worst-case age on every edge, no zero-delay loops, and the sum of all WCET budgets within one tick. That each block meets its budget is **not** proved until a WCET bound exists (NOTES.md D-001).
 
 ## 7. What is trusted, not proved
