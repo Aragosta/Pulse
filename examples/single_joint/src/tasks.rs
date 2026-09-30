@@ -6,8 +6,9 @@ use crate::sim::{self, timed};
 use bincode::{Decode, Encode};
 use core::sync::atomic::Ordering::Relaxed;
 use cu29::prelude::*;
-use pulse_joint::{CurrentCtl, PositionCtl, SensorModel, ThermalFsm};
+use pulse_joint::generated;
 pub use pulse_joint::{DERATING, FAULT, NOMINAL};
+use pulse_joint::{PositionCtl, SensorModel, ThermalFsm};
 use serde::{Deserialize, Serialize};
 
 macro_rules! payload {
@@ -209,12 +210,13 @@ impl CuTask for ThermalFsmTask {
 }
 
 // ---- current_loop (8 kHz): PI on the full-rate current, setpoint clamped by the thermal limit -------------------------
+// The controller is generated from the IR (`ir::current_loop`), not hand-written.
 
 #[derive(Reflect)]
 pub struct CurrentLoop {
     tick: u64,
     #[reflect(ignore)]
-    ctl: CurrentCtl,
+    ctl: generated::CurrentLoop,
 }
 impl Freezable for CurrentLoop {}
 
@@ -226,7 +228,7 @@ impl CuTask for CurrentLoop {
     fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self> {
         Ok(Self {
             tick: 0,
-            ctl: CurrentCtl::new().map_err(cfg_err)?,
+            ctl: generated::CurrentLoop::new(),
         })
     }
 
@@ -240,12 +242,11 @@ impl CuTask for CurrentLoop {
         timed(sim::CUR, critical(self.tick), || {
             if let (Some(s), Some(r), Some(l)) = (sensor.payload(), iref.payload(), limit.payload())
             {
-                let out = self.ctl.update(r.amps, s.current, l.scale, l.state);
+                let (volts, setpoint) = self.ctl.step(r.amps, s.current, l.scale, l.state);
                 if l.state == DERATING {
                     sim::DERATE_SETPOINT_MAX_MA
-                        .fetch_max((out.setpoint.abs() * 1000.0) as u64, Relaxed);
+                        .fetch_max((setpoint.abs() * 1000.0) as u64, Relaxed);
                 }
-                let volts = out.volts;
                 output.set_payload(VoltageCmd { volts });
             }
         });

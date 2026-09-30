@@ -56,6 +56,7 @@ mod tests {
             wcet_budget_ns: 0,
             sensor: None,
             imp: imp.map(Into::into),
+            compute: None,
             span: None,
         }
     }

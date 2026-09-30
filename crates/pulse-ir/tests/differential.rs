@@ -37,6 +37,7 @@ fn random_ir(r: &mut Rng) -> Ir {
                 max_dropout_run: r.below(4) as u32,
             }),
             imp: None,
+            compute: None,
             span: None,
         })
         .collect();

@@ -2,7 +2,10 @@
 //! Frontends (hand-written today; Python/Modelica later) build an `Ir`; `class1::check` proves temporal properties from it.
 
 pub mod class1;
+pub mod class3;
 pub mod copper;
+pub mod expr;
+pub mod rust;
 
 use serde::{Deserialize, Serialize};
 
@@ -56,6 +59,10 @@ pub struct Block {
     /// Where the frontend declared this (e.g. `model.py:42`), so violations point at the source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub span: Option<String>,
+    /// What the block computes on each firing, as data: codegen, proofs and the reference model all read this.
+    /// `None`: behaviour lives only in `imp` (hand-written, not verified).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compute: Option<expr::Compute>,
 }
 
 /// How a cross-rate read is made legal. Never implicit.
@@ -100,7 +107,7 @@ fn is_zero(n: &u32) -> bool {
     *n == 0
 }
 
-fn is_ident(s: &str) -> bool {
+pub(crate) fn is_ident(s: &str) -> bool {
     let mut c = s.chars();
     c.next()
         .is_some_and(|f| f.is_ascii_alphabetic() || f == '_')
@@ -142,6 +149,9 @@ impl Ir {
                     "IR-DUP-ID",
                     format!("block id {:?} declared twice", b.id),
                 ));
+            }
+            for e in b.compute.iter().flat_map(|c| c.validate()) {
+                bad.push(v("ir", "IR-COMPUTE", format!("{}: {e}", b.id)));
             }
             if b.imp.as_deref().is_some_and(|p| !is_path(p)) {
                 bad.push(v(

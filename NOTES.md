@@ -5,6 +5,23 @@ Facts are marked **verified** (checked against a source, linked) or **unverified
 
 ## Decisions
 
+### D-007: Behaviour lives in the IR; one walk, many interpretations (Decided, 2026-09-30)
+
+**Goal restated.** Model in (physics, control, ML), verified firmware or verified live commands out; nobody hand-writes firmware. So the IR must hold *what a block computes*, not a path to hand-written Rust, or what is verified and what ships are two different things.
+
+**Shape.** `Block.compute: Option<Compute>`: typed ports (dtype, unit, range: an assumption on inputs, an obligation on outputs), literal-initialised state, ordered `defs`, `outputs`, `next`. Expressions (`pulse_ir::expr`) are a small total language over f32/bool: arithmetic, Rust `max`/`min` (NaN-ignoring), comparisons, logic, `is_finite`, `select`. No loops, no calls, no algebraic rewriting (`0 * x` is NaN when `x` is).
+
+**One walk, many domains (the Julia lesson: one generic function, many number types).** `Compute::step` is generic over a `Domain`: `F32` (what the chip computes), `F64` (the model), `Intervals` (proofs, `class3`), `Emit` (Rust source, `rust::emit`). Codegen is the same walk as the interpreter, so the generated code performs the same f32 operations in the same order by construction.
+
+**Done.** The 8 kHz current loop is IR (`examples/single_joint/src/ir.rs::current_loop`, reproducing multicalc's `Pid::update` term for term). `crates/pulse-joint/src/generated.rs` is generated from it (golden file, `PULSE_BLESS=1`), builds for `thumbv8m.main-none-eabihf`, and the Copper task now runs it. Evidence:
+- Generated == hand-written `CurrentCtl` bit for bit over 400k random steps incl. NaN/inf/fault resets; generated == f32 interpreter over 200k steps; f32 firmware within 1e-3 V of the f64 model on a nominal run. Stall oracle unchanged (16840/37160).
+- `C3-RANGE` (interval proof, outward-rounded to f32, branch-refining on `x >= c` / `is_finite(x)`): `volts` in [-24, 24] and `setpoint` in [-8, 8] for every input including NaN/inf, from any state.
+- Mutation check on the model: 3/5 caught; `p + (cand + d)` survives because it is equivalent here (d is +-0 or NaN); anti-windup `>=` vs `>` survives because it differs only at unsat == 24.0 exactly. Sampling cannot find that; an equivalence proof can.
+
+**Finding (hand-written firmware, reproduced faithfully).** One NaN current sample latches the output at -24 V (full reverse) until a thermal fault: the NaN enters the derivative filter state and stays (0 * NaN = NaN even with KD = 0), and `f32::max` maps the NaN sum to the lower rail. The range proof passes because -24 V is in range; the missing property is "a bad sample does not latch", a multi-step property. Fix in the model once there is a check that states it.
+
+**Next.** Thermal FSM as data (states/guards/transitions; reachable, deterministic, total), then the position loop, then split I/O from environment blocks and generate `tasks.rs`; NN block with an interval-bound output envelope.
+
 ### D-006: What the IR is for, and its shape (Proposed, 2026-09-29)
 
 **Role.** The IR is the one contract between layers: frontends (Python, Rumoca/Modelica, FMI import) write it; checks (Class 1/2/3), codegen, the WCET provider and the MCP server read it. Everything downstream is generated from it, including `copperconfig.ron`; once that is generated, the drift test in `examples/single_joint/src/ir.rs` goes away.
@@ -129,8 +146,10 @@ Python is a compile-time authoring layer only, never linked into the binary (Pyt
 - [x] CI: fmt, clippy `-D warnings`, `cargo test`, `thumbv8m.main-none-eabihf` build (`.github/workflows/ci.yml`)
 - [ ] Align hold vocabulary with Modelica 3.3 synchronous (`subSample`, `hold`, `previous`) and add ModelingToolkit.jl clocks to prior art
 - [ ] Minimal Python frontend that writes the single-joint IR JSON (D-004)
-- [ ] Generate task glue from the IR (needs FSM as data / expression language)
-- [ ] IR: typed ports, FSM as data, expression language (prerequisites for Class 2/3)
+- [x] Expression language + typed ports in the IR; current loop generated from it and running (D-007)
+- [ ] Generate task glue from the IR (needs FSM as data)
+- [ ] IR: FSM as data; I/O vs environment blocks; NN block
+- [ ] Fix the NaN latch in the current loop's derivative filter, with a check that a bad sample cannot latch (D-007)
 - [ ] JSON Schema for the IR (`schemars`) and the MCP server, when a frontend or agent consumes the file
 - [ ] Add "Frontend" section to `README.md` (D-004)
 - [ ] Structural Coverage and Symbolic Proof on the single-joint example (only after Class 1 is solid, per the README)

@@ -27,5 +27,5 @@ pub const WALL_K: f64 = 100.0;
 pub const WALL_D: f64 = 0.05;
 pub const THETA_REF: f32 = 1.0;
 
-// Timing contracts (WCET budgets), sized for a ~150 MHz Cortex-M33 class target. Summed on the busiest tick they must fit in 125 us.
+// Timing contracts (WCET budgets), sized for a ~150 MHz Cortex-M33 class target. Every task runs every tick, so they must sum to <= 125 us.
 pub const BUDGET_NS: [u64; 6] = [15_000, 5_000, 20_000, 10_000, 30_000, 10_000];

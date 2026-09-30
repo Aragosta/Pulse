@@ -68,6 +68,15 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // Class 3, static: output ranges of every block whose behaviour is in the IR.
+    let range_violations = pulse_ir::class3::check(&ir);
+    if !range_violations.is_empty() {
+        eprintln!("Class 3 (output ranges): REFUSING TO RUN");
+        for v in range_violations {
+            eprintln!("  [FAIL] {} ({}): {}", v.check, v.code, v.msg);
+        }
+        std::process::exit(1);
+    }
 
     println!(
         "running {seconds} s of sim at {BASE_HZ} Hz ({} ticks)...",
@@ -112,6 +121,26 @@ fn main() {
         report.tick_budget_ns as f64 / 1e3,
         tick_ns as f64 / 1e3
     );
+    for b in ir.blocks.iter().filter(|b| b.compute.is_some()) {
+        let c = b.compute.as_ref().unwrap();
+        let ranges: Vec<String> = c
+            .outputs
+            .iter()
+            .filter_map(|p| {
+                let [lo, hi] = p.range?;
+                Some(format!(
+                    "{} in [{lo}, {hi}] {}",
+                    p.name,
+                    p.unit.as_deref().unwrap_or("")
+                ))
+            })
+            .collect();
+        println!(
+            "  [PASS] output ranges     {}: {} for every input incl. NaN/inf (interval proof)",
+            b.id,
+            ranges.join(", ")
+        );
+    }
     println!(
         "  [ -- ] WCET <= budget    NOT PROVEN: no static WCET bound yet (see NOTES.md D-001), observed only below"
     );

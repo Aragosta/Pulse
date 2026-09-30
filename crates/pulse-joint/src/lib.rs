@@ -3,6 +3,11 @@
 
 #![no_std]
 
+// Generated from the IR, never hand-edited. Parentheses fix evaluation order; `x.max(lo).min(hi)` and `(1 - 1) * x`
+// are deliberate (`clamp` panics on NaN bounds; `0 * x` is NaN when `x` is), so lints that would rewrite them are off.
+#[rustfmt::skip]
+#[allow(unused_parens, clippy::double_parens, clippy::manual_clamp, clippy::eq_op)]
+pub mod generated;
 pub mod params;
 
 use multicalc::control::Pid;
@@ -261,5 +266,50 @@ mod tests {
             (15_000..25_000).contains(&drops),
             "dropout rate ~{DROPOUT_P}: {drops}"
         );
+    }
+
+    /// The firmware generated from the IR is bit-identical to this hand-written controller, including NaN,
+    /// infinities, rail saturation and fault resets. The hand-written one stays as the oracle until it is retired.
+    #[test]
+    fn generated_current_loop_matches_hand_written() {
+        let mut rng = Pcg32::new(7);
+        let odd = [
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            -0.0,
+            0.0,
+            1e30,
+            -1e30,
+            8.0,
+            -8.0,
+            0.75,
+        ];
+        let pick = |rng: &mut Pcg32<f32>, odd: &[f32]| {
+            if rng.next_unit() < 0.1 {
+                odd[(rng.next_unit() * odd.len() as f32) as usize % odd.len()]
+            } else {
+                rng.next_unit() * 20.0 - 10.0
+            }
+        };
+        for run in 0..200 {
+            let (mut hand, mut generated) =
+                (CurrentCtl::new().unwrap(), generated::CurrentLoop::new());
+            for i in 0..2000 {
+                let (w, m) = (pick(&mut rng, &odd), pick(&mut rng, &odd));
+                let s = pick(&mut rng, &[f32::NAN, -1.0, 0.0, DERATE_SCALE, 1.0, 2.0]);
+                let state = [NOMINAL, NOMINAL, NOMINAL, DERATING, FAULT]
+                    [(rng.next_unit() * 5.0) as usize % 5];
+                let want = hand.update(w, m, s, state);
+                let got = generated.step(w, m, s, state);
+                assert!(
+                    got.0.to_bits() == want.volts.to_bits()
+                        && got.1.to_bits() == want.setpoint.to_bits(),
+                    "run {run} step {i} ({w}, {m}, {s}, {state}): generated {got:?}, hand-written ({}, {})",
+                    want.volts,
+                    want.setpoint
+                );
+            }
+        }
     }
 }

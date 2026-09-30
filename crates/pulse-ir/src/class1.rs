@@ -228,6 +228,7 @@ mod tests {
             wcet_budget_ns: wcet,
             sensor: None,
             imp: None,
+            compute: None,
             span: None,
         }
     }
