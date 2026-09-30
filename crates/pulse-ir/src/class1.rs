@@ -227,7 +227,6 @@ mod tests {
             rate_hz,
             wcet_budget_ns: wcet,
             sensor: None,
-            imp: None,
             compute: None,
             span: None,
         }
@@ -239,7 +238,8 @@ mod tests {
             hold,
             max_age_ns: None,
             delay_ticks: 0,
-            msg: None,
+            from_port: None,
+            to_port: None,
             span: None,
         }
     }
@@ -393,8 +393,8 @@ mod tests {
                 .any(|v| v.code == "IR-DUP-ID")
         );
         let mut ir = good();
-        ir.blocks[0].imp = Some("t::A\"), (id: \"x".into()); // would inject into copperconfig.ron
-        assert_eq!(only(&ir), "IR-NAME");
+        ir.blocks[0].id = "fa__st".into(); // `__` is reserved for flattened names
+        assert_eq!(check(&ir).unwrap_err()[0].code, "IR-NAME");
     }
     #[test]
     fn unknown_json_field_rejected() {

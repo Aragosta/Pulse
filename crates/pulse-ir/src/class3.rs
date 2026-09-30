@@ -326,8 +326,10 @@ pub fn step_intervals(c: &Compute) -> (Vec<V<Intervals>>, Vec<V<Intervals>>) {
     c.step(&mut d, inputs, state)
 }
 
+/// Whether `iv` leaves `[lo, hi]`. Values are f32, so a range means its f32 hull (the same hull assumed on entry);
+/// otherwise a held, unchanged state would fail an invariant whose bounds are not f32 numbers.
 fn outside(iv: Iv, [lo, hi]: [f64; 2]) -> Option<String> {
-    (iv.nan || (!iv.empty() && (iv.lo < lo || iv.hi > hi))).then(|| {
+    (iv.nan || (!iv.empty() && (iv.lo < down(lo) || iv.hi > up(hi)))).then(|| {
         format!(
             "can be [{}, {}]{} outside [{lo}, {hi}]",
             iv.lo,
@@ -338,37 +340,45 @@ fn outside(iv: Iv, [lo, hi]: [f64; 2]) -> Option<String> {
 }
 
 /// `C3-INVARIANT`: every state range holds initially, and one firing from inside all of them (any allowed input)
-/// stays inside, so by induction it holds on every firing. `C3-RANGE`: under those invariants every output stays
-/// inside its declared range and is never NaN.
+/// stays inside, so by induction it holds on every firing. `C3-RANGE`: under those invariants every declared output
+/// range holds and is never NaN. Proved on the whole firmware (`graph::firmware`), so inputs between blocks carry
+/// what their producers are proved to output.
 pub fn check(ir: &Ir) -> Vec<Violation> {
+    let fw = match crate::graph::firmware(ir) {
+        Ok(fw) => fw,
+        Err(es) => return es.into_iter().map(|e| v("graph", "IR-GRAPH", e)).collect(),
+    };
+    let mut c = fw.compute;
+    let boundary = c.outputs.len();
+    c.outputs.extend(fw.probes);
     let mut bad = Vec::new();
-    for blk in &ir.blocks {
-        let Some(c) = &blk.compute else { continue };
-        let Ok(c) = &ir.flat(c) else { continue }; // reported by `Ir::validate`
-        let (outs, next) = step_intervals(c);
-        let init = c.init(&mut Intervals::default());
-        for ((s, n), i) in c.state.iter().zip(next).zip(init) {
-            let (Some(r), Val::N(n), Val::N(i)) = (s.range, n, i) else {
-                continue;
-            };
-            for (when, iv) in [("initially", i), ("after a firing", n)] {
-                if let Some(why) = outside(iv, r) {
-                    let msg = format!("{}.{} {when} {why}", blk.id, s.name);
-                    bad.push(v("invariant", "C3-INVARIANT", msg));
-                }
-            }
-        }
-        for (p, o) in c.outputs.iter().zip(outs) {
-            let (Some(r), Val::N(iv)) = (p.range, o) else {
-                continue;
-            };
+    let (outs, next) = step_intervals(&c);
+    let init = c.init(&mut Intervals::default());
+    for ((s, n), i) in c.state.iter().zip(next).zip(init) {
+        let (Some(r), Val::N(n), Val::N(i)) = (s.range, n, i) else {
+            continue;
+        };
+        for (when, iv) in [("initially", i), ("after a firing", n)] {
             if let Some(why) = outside(iv, r) {
                 bad.push(v(
-                    "range",
-                    "C3-RANGE",
-                    format!("{}.{} {why}", blk.id, p.name),
+                    "invariant",
+                    "C3-INVARIANT",
+                    format!("{} {when} {why}", s.name),
                 ));
             }
+        }
+    }
+    for (k, (p, o)) in c.outputs.iter().zip(outs).enumerate() {
+        let (Some(r), Val::N(iv)) = (p.range, o) else {
+            continue;
+        };
+        if let Some(why) = outside(iv, r) {
+            let what = if k < boundary {
+                "output"
+            } else {
+                "block output"
+            };
+            bad.push(v("range", "C3-RANGE", format!("{what} {} {why}", p.name)));
         }
     }
     bad

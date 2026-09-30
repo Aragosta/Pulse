@@ -269,11 +269,12 @@ mod tests {
         );
     }
 
-    /// The firmware generated from the IR is this hand-written controller plus one fix: a bad current sample (NaN,
-    /// inf) is replaced by the last good one, so it cannot latch the output. So the hand-written controller fed that
-    /// substituted stream must match it bit for bit, including infinities, rail saturation and fault resets.
+    /// The firmware generated from the IR is the hand-written controllers wired as the old Copper tasks wired them
+    /// (position PID and thermal FSM firing every 40th tick and holding their outputs, the current PI every tick),
+    /// plus one fix: a bad current or angle sample is replaced by the last good one. So that chain, fed the
+    /// substituted samples, must match it bit for bit, including NaN temperatures, rail saturation and fault resets.
     #[test]
-    fn generated_current_loop_matches_hand_written() {
+    fn generated_firmware_matches_hand_written_chain() {
         let mut rng = Pcg32::new(7);
         let odd = [
             f32::NAN,
@@ -284,33 +285,44 @@ mod tests {
             1e30,
             -1e30,
             8.0,
-            -8.0,
-            0.75,
         ];
-        let pick = |rng: &mut Pcg32<f32>, odd: &[f32]| {
-            if rng.next_unit() < 0.1 {
+        let pick = |rng: &mut Pcg32<f32>, lo: f32, hi: f32| {
+            if rng.next_unit() < 0.05 {
                 odd[(rng.next_unit() * odd.len() as f32) as usize % odd.len()]
             } else {
-                rng.next_unit() * 20.0 - 10.0
+                lo + rng.next_unit() * (hi - lo)
             }
         };
-        for run in 0..200 {
-            let (mut hand, mut generated) =
-                (CurrentCtl::new().unwrap(), generated::CurrentLoop::new());
-            let mut last_good = 0.0; // what the generated loop substitutes; reset to 0 on fault like its state
-            for i in 0..2000 {
-                let (w, m) = (pick(&mut rng, &odd), pick(&mut rng, &odd));
-                let s = pick(&mut rng, &[f32::NAN, -1.0, 0.0, DERATE_SCALE, 1.0, 2.0]);
-                let state = [NOMINAL, NOMINAL, NOMINAL, DERATING, FAULT]
-                    [(rng.next_unit() * 5.0) as usize % 5];
-                let fed = if m.is_finite() { m } else { last_good };
-                last_good = if state == FAULT { 0.0 } else { fed };
-                let want = hand.update(w, fed, s, state);
-                let got = generated.step(w, m, s, state);
+        for run in 0..50 {
+            let mut fw = generated::Firmware::new();
+            let (mut pos, mut fsm, mut cur) = (
+                PositionCtl::new().unwrap(),
+                ThermalFsm::new(),
+                CurrentCtl::new().unwrap(),
+            );
+            let (mut amps, mut state) = (0.0, NOMINAL);
+            // What the generated PIDs substitute for a bad sample: their stored last good measurement.
+            let (mut last_theta, mut last_i) = (0.0, 0.0);
+            for k in 0..4000u32 {
+                let theta = pick(&mut rng, -2.0, 2.0);
+                let current = pick(&mut rng, -10.0, 10.0);
+                let temp = pick(&mut rng, 20.0, 110.0);
+                let cmd = rng.next_unit() * 2.0 - 1.0; // the command contract: finite, within +-10 rad
+                if k.is_multiple_of(DECIMATION as u32) {
+                    let th = if theta.is_finite() { theta } else { last_theta };
+                    last_theta = th;
+                    amps = pos.update(cmd, th);
+                    state = fsm.update(temp);
+                }
+                let fed = if current.is_finite() { current } else { last_i };
+                last_i = if state == FAULT { 0.0 } else { fed };
+                let want = cur.update(amps, fed, ThermalFsm::scale(state), state);
+                let got = fw.step(theta, current, temp, cmd);
                 assert!(
                     got.0.to_bits() == want.volts.to_bits()
-                        && got.1.to_bits() == want.setpoint.to_bits(),
-                    "run {run} step {i} ({w}, {m}, {s}, {state}): generated {got:?}, hand-written ({}, {})",
+                        && got.1 == state as f32
+                        && got.2.to_bits() == want.setpoint.to_bits(),
+                    "run {run} tick {k} ({theta}, {current}, {temp}, {cmd}): generated {got:?}, hand-written ({}, {state}, {})",
                     want.volts,
                     want.setpoint
                 );
@@ -318,12 +330,12 @@ mod tests {
         }
     }
 
-    /// The latch the hand-written loop had: one NaN current sample drove it to -24 V until a fault.
+    /// The latch the hand-written current loop had: one NaN current sample drove it to -24 V until a fault.
     #[test]
     fn one_bad_current_sample_does_not_latch() {
-        let mut c = generated::CurrentLoop::new();
+        let mut fw = generated::Firmware::new();
         let volts: [f32; 6] =
-            [0.0, 0.0, f32::NAN, 0.0, 0.0, 0.0].map(|m| c.step(1.0, m, 1.0, NOMINAL).0);
+            [0.0, 0.0, f32::NAN, 0.0, 0.0, 0.0].map(|i| fw.step(0.0, i, 25.0, 1.0).0);
         assert!(volts.iter().all(|v| (0.0..24.0).contains(v)), "{volts:?}");
     }
 }

@@ -3,15 +3,15 @@
 
 pub mod class1;
 pub mod class3;
-pub mod copper;
 pub mod expr;
+pub mod graph;
 pub mod rust;
 pub mod units;
 
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any breaking change to the serialized shape.
-pub const IR_VERSION: u32 = 3;
+pub const IR_VERSION: u32 = 4;
 
 #[derive(Debug, PartialEq, Serialize)]
 pub struct Violation {
@@ -54,14 +54,11 @@ pub struct Block {
     /// its firings (Copper runs every task on every base tick). Proving WCET <= budget is a separate step (NOTES.md D-001).
     pub wcet_budget_ns: u64,
     pub sensor: Option<SensorSpec>,
-    /// Rust type implementing this block as a runtime task (e.g. `tasks::Sensor`). `None`: not a task (simulated plant).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub imp: Option<String>,
     /// Where the frontend declared this (e.g. `model.py:42`), so violations point at the source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub span: Option<String>,
     /// What the block computes on each firing, as data: codegen, proofs and the reference model all read this.
-    /// `None`: behaviour lives only in `imp` (hand-written, not verified).
+    /// `Some`: the block is firmware. `None`: the outside world (plant, sensor, command, actuator; `graph`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compute: Option<expr::Compute>,
 }
@@ -88,9 +85,12 @@ pub struct Edge {
     /// loop needs at least one edge with a delay, otherwise the loop is an algebraic loop with no evaluation order.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub delay_ticks: u32,
-    /// Payload type carried on this edge (e.g. `crate::tasks::SensorSample`).
+    /// Which output of `from` and input of `to` this edge connects. Required on firmware ends; on outside ends
+    /// it names the signal (the firmware input or output is `{block}__{port}`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub msg: Option<String>,
+    pub from_port: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_port: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub span: Option<String>,
 }
@@ -116,11 +116,6 @@ pub(crate) fn is_ident(s: &str) -> bool {
     c.next()
         .is_some_and(|f| f.is_ascii_alphabetic() || f == '_')
         && c.all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
-/// `a::b::C`: what `imp` and `msg` must look like, since codegen pastes them into Rust.
-fn is_path(s: &str) -> bool {
-    s.split("::").all(is_ident)
 }
 
 impl Ir {
@@ -155,7 +150,7 @@ impl Ir {
         self.blocks.iter().find(|b| b.id == id)
     }
 
-    /// Well-formedness every pass relies on: known version, unique identifier ids, Rust-path `imp`/`msg`.
+    /// Well-formedness every pass relies on: known version, unique identifier ids, well-formed and well-unit block behaviour.
     /// The IR arrives from frontends and agents, so this is the trust boundary.
     pub fn validate(&self) -> Vec<Violation> {
         let mut bad = Vec::new();
@@ -189,11 +184,11 @@ impl Ir {
                     bad.push(v("ir", "IR-UNIT", format!("{}: {e}", b.id)));
                 }
             }
-            if b.imp.as_deref().is_some_and(|p| !is_path(p)) {
+            if b.id.contains("__") || b.id.starts_with('_') {
                 bad.push(v(
                     "ir",
                     "IR-NAME",
-                    format!("{}: imp {:?} is not a Rust path", b.id, b.imp),
+                    format!("block id {:?}: `__` and a leading `_` are reserved", b.id),
                 ));
             }
         }
@@ -221,15 +216,6 @@ impl Ir {
             }
             for e in units::check(&comp.compute, &self.components) {
                 bad.push(v("ir", "IR-UNIT", format!("component {}: {e}", comp.name)));
-            }
-        }
-        for e in &self.edges {
-            if e.msg.as_deref().is_some_and(|p| !is_path(p)) {
-                bad.push(v(
-                    "ir",
-                    "IR-NAME",
-                    format!("{} -> {}: msg {:?} is not a Rust path", e.from, e.to, e.msg),
-                ));
             }
         }
         bad

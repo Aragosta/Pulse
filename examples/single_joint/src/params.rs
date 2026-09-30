@@ -27,5 +27,10 @@ pub const WALL_K: f64 = 100.0;
 pub const WALL_D: f64 = 0.05;
 pub const THETA_REF: f32 = 1.0;
 
-// Timing contracts (WCET budgets), sized for a ~150 MHz Cortex-M33 class target. Every task runs every tick, so they must sum to <= 125 us.
-pub const BUDGET_NS: [u64; 6] = [15_000, 5_000, 20_000, 10_000, 30_000, 10_000];
+// Timing contracts (WCET budgets), sized for a ~150 MHz Cortex-M33 class target. The firmware runs every block every
+// tick (slow ones compute and are gated), and the sensor read and actuator write are drivers, so all must sum <= 125 us.
+pub const SENSOR_BUDGET_NS: u64 = 15_000;
+pub const POSITION_BUDGET_NS: u64 = 20_000;
+pub const THERMAL_BUDGET_NS: u64 = 10_000;
+pub const CURRENT_BUDGET_NS: u64 = 30_000;
+pub const ACTUATOR_BUDGET_NS: u64 = 10_000;

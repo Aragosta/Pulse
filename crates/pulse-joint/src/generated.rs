@@ -1,58 +1,120 @@
 //! GENERATED from the Pulse IR (`examples/single_joint/src/ir.rs`). Do not edit; regenerate with
 //! `PULSE_BLESS=1 cargo test -p single_joint`.
 
-pub struct CurrentLoop {
-    pub pid__integral: f32,
-    pub pid__prev_meas: f32,
-    pub pid__has_prev: bool,
-    pub pid__filt: f32,
-    pub pid__filt_init: bool,
+pub struct Firmware {
+    pub __tick_40: f32,
+    pub position_loop__pid__integral: f32,
+    pub position_loop__pid__prev_meas: f32,
+    pub position_loop__pid__has_prev: bool,
+    pub position_loop__pid__filt: f32,
+    pub position_loop__pid__filt_init: bool,
+    pub position_loop__amps__held: f32,
+    pub thermal_fsm__mode: f32,
+    pub thermal_fsm__state__held: f32,
+    pub thermal_fsm__scale__held: f32,
+    pub current_loop__pid__integral: f32,
+    pub current_loop__pid__prev_meas: f32,
+    pub current_loop__pid__has_prev: bool,
+    pub current_loop__pid__filt: f32,
+    pub current_loop__pid__filt_init: bool,
 }
 
-impl Default for CurrentLoop {
+impl Default for Firmware {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl CurrentLoop {
+impl Firmware {
     pub const fn new() -> Self {
         Self {
-            pid__integral: 0.0_f32,
-            pid__prev_meas: 0.0_f32,
-            pid__has_prev: false,
-            pid__filt: 0.0_f32,
-            pid__filt_init: false,
+            __tick_40: 0.0_f32,
+            position_loop__pid__integral: 0.0_f32,
+            position_loop__pid__prev_meas: 0.0_f32,
+            position_loop__pid__has_prev: false,
+            position_loop__pid__filt: 0.0_f32,
+            position_loop__pid__filt_init: false,
+            position_loop__amps__held: 0.0_f32,
+            thermal_fsm__mode: 0.0_f32,
+            thermal_fsm__state__held: 0.0_f32,
+            thermal_fsm__scale__held: 0.0_f32,
+            current_loop__pid__integral: 0.0_f32,
+            current_loop__pid__prev_meas: 0.0_f32,
+            current_loop__pid__has_prev: false,
+            current_loop__pid__filt: 0.0_f32,
+            current_loop__pid__filt_init: false,
         }
     }
 
-    pub fn step(&mut self, v_wanted: f32, v_measured: f32, v_scale: f32, v_state: u8) -> (f32, f32,) {
-        let v_state = v_state as f32;
-        let v_lim = (if (v_scale >= 0.0_f32) { (8.0_f32 * v_scale.min(1.0_f32)) } else { 0.0_f32 });
-        let v_setpoint = (if v_wanted.is_finite() { v_wanted.max((-v_lim)).min(v_lim) } else { 0.0_f32 });
-        let v_fault = (v_state == 2.0_f32);
-        let v_pid__meas = (if v_measured.is_finite() { v_measured } else { self.pid__prev_meas });
-        let v_pid__error = (v_setpoint - v_pid__meas);
-        let v_pid__p_term = (1.26_f32 * v_pid__error);
-        let v_pid__raw_d = (if self.pid__has_prev { ((self.pid__prev_meas - v_pid__meas) / 0.000125_f32) } else { 0.0_f32 });
-        let v_pid__filt_d = (if self.pid__filt_init { ((1.0_f32 * v_pid__raw_d) + ((1.0_f32 - 1.0_f32) * self.pid__filt)) } else { v_pid__raw_d });
-        let v_pid__d_term = (0.0_f32 * v_pid__filt_d);
-        let v_pid__cand = (self.pid__integral + ((1257.0_f32 * v_pid__error) * 0.000125_f32));
-        let v_pid__unsat = ((v_pid__p_term + v_pid__cand) + v_pid__d_term);
-        let v_pid__out = v_pid__unsat.max((-24.0_f32)).min(24.0_f32);
-        let v_pid__deeper = (((v_pid__unsat > 24.0_f32) && (v_pid__error > 0.0_f32)) || ((v_pid__unsat < (-24.0_f32)) && (v_pid__error < 0.0_f32)));
-        let v_volts = (if v_fault { 0.0_f32 } else { v_pid__out });
-        let n_pid__integral = (if v_fault { 0.0_f32 } else { (if v_pid__deeper { self.pid__integral } else { v_pid__cand }).max((-24.0_f32)).min(24.0_f32) });
-        let n_pid__prev_meas = (if v_fault { 0.0_f32 } else { v_pid__meas });
-        let n_pid__has_prev = (!v_fault);
-        let n_pid__filt = (if v_fault { 0.0_f32 } else { v_pid__filt_d });
-        let n_pid__filt_init = (!v_fault);
-        let out = (v_volts, v_setpoint,);
-        self.pid__integral = n_pid__integral;
-        self.pid__prev_meas = n_pid__prev_meas;
-        self.pid__has_prev = n_pid__has_prev;
-        self.pid__filt = n_pid__filt;
-        self.pid__filt_init = n_pid__filt_init;
+    pub fn step(&mut self, v_sensor__theta: f32, v_sensor__current: f32, v_sensor__temp: f32, v_command__theta: f32) -> (f32, f32, f32,) {
+        let v___fire_40 = (self.__tick_40 == 0.0_f32);
+        let v___bump_40 = (self.__tick_40 + 1.0_f32);
+        let v_position_loop__pid__meas = (if v_sensor__theta.is_finite() { v_sensor__theta } else { self.position_loop__pid__prev_meas });
+        let v_position_loop__pid__error = (v_command__theta - v_position_loop__pid__meas);
+        let v_position_loop__pid__p_term = (1.8_f32 * v_position_loop__pid__error);
+        let v_position_loop__pid__raw_d = (if self.position_loop__pid__has_prev { ((self.position_loop__pid__prev_meas - v_position_loop__pid__meas) / 0.005_f32) } else { 0.0_f32 });
+        let v_position_loop__pid__filt_d = (if self.position_loop__pid__filt_init { ((1.0_f32 * v_position_loop__pid__raw_d) + ((1.0_f32 - 1.0_f32) * self.position_loop__pid__filt)) } else { v_position_loop__pid__raw_d });
+        let v_position_loop__pid__d_term = (0.108_f32 * v_position_loop__pid__filt_d);
+        let v_position_loop__pid__cand = (self.position_loop__pid__integral + ((6.0_f32 * v_position_loop__pid__error) * 0.005_f32));
+        let v_position_loop__pid__unsat = ((v_position_loop__pid__p_term + v_position_loop__pid__cand) + v_position_loop__pid__d_term);
+        let v_position_loop__pid__out = v_position_loop__pid__unsat.max((-8.0_f32)).min(8.0_f32);
+        let v_position_loop__pid__deeper = (((v_position_loop__pid__unsat > 8.0_f32) && (v_position_loop__pid__error > 0.0_f32)) || ((v_position_loop__pid__unsat < (-8.0_f32)) && (v_position_loop__pid__error < 0.0_f32)));
+        let v_position_loop__amps = v_position_loop__pid__out;
+        let v_position_loop__amps__now = (if v___fire_40 { v_position_loop__amps } else { self.position_loop__amps__held });
+        let v_thermal_fsm__state = (if ((v_sensor__temp > 100.0_f32) || (!(v_sensor__temp == v_sensor__temp))) { 2.0_f32 } else { (if (self.thermal_fsm__mode == 2.0_f32) { 2.0_f32 } else { (if ((self.thermal_fsm__mode == 0.0_f32) && (v_sensor__temp > 80.0_f32)) { 1.0_f32 } else { (if ((self.thermal_fsm__mode == 1.0_f32) && (v_sensor__temp < 70.0_f32)) { 0.0_f32 } else { self.thermal_fsm__mode }) }) }) });
+        let v_thermal_fsm__scale = (if (v_thermal_fsm__state == 0.0_f32) { 1.0_f32 } else { (if (v_thermal_fsm__state == 1.0_f32) { 0.75_f32 } else { 0.0_f32 }) });
+        let v_thermal_fsm__state__now = (if v___fire_40 { v_thermal_fsm__state } else { self.thermal_fsm__state__held });
+        let v_thermal_fsm__scale__now = (if v___fire_40 { v_thermal_fsm__scale } else { self.thermal_fsm__scale__held });
+        let v_current_loop__lim = (if (v_thermal_fsm__scale__now >= 0.0_f32) { (8.0_f32 * v_thermal_fsm__scale__now.min(1.0_f32)) } else { 0.0_f32 });
+        let v_current_loop__setpoint = (if v_position_loop__amps__now.is_finite() { v_position_loop__amps__now.max((-v_current_loop__lim)).min(v_current_loop__lim) } else { 0.0_f32 });
+        let v_current_loop__fault = (v_thermal_fsm__state__now == 2.0_f32);
+        let v_current_loop__pid__meas = (if v_sensor__current.is_finite() { v_sensor__current } else { self.current_loop__pid__prev_meas });
+        let v_current_loop__pid__error = (v_current_loop__setpoint - v_current_loop__pid__meas);
+        let v_current_loop__pid__p_term = (1.26_f32 * v_current_loop__pid__error);
+        let v_current_loop__pid__raw_d = (if self.current_loop__pid__has_prev { ((self.current_loop__pid__prev_meas - v_current_loop__pid__meas) / 0.000125_f32) } else { 0.0_f32 });
+        let v_current_loop__pid__filt_d = (if self.current_loop__pid__filt_init { ((1.0_f32 * v_current_loop__pid__raw_d) + ((1.0_f32 - 1.0_f32) * self.current_loop__pid__filt)) } else { v_current_loop__pid__raw_d });
+        let v_current_loop__pid__d_term = (0.0_f32 * v_current_loop__pid__filt_d);
+        let v_current_loop__pid__cand = (self.current_loop__pid__integral + ((1257.0_f32 * v_current_loop__pid__error) * 0.000125_f32));
+        let v_current_loop__pid__unsat = ((v_current_loop__pid__p_term + v_current_loop__pid__cand) + v_current_loop__pid__d_term);
+        let v_current_loop__pid__out = v_current_loop__pid__unsat.max((-24.0_f32)).min(24.0_f32);
+        let v_current_loop__pid__deeper = (((v_current_loop__pid__unsat > 24.0_f32) && (v_current_loop__pid__error > 0.0_f32)) || ((v_current_loop__pid__unsat < (-24.0_f32)) && (v_current_loop__pid__error < 0.0_f32)));
+        let v_current_loop__volts = (if v_current_loop__fault { 0.0_f32 } else { v_current_loop__pid__out });
+        let v_current_loop__volts__now = v_current_loop__volts;
+        let v_current_loop__setpoint__now = v_current_loop__setpoint;
+        let v_actuator__volts = v_current_loop__volts__now;
+        let v_telemetry__thermal_state = v_thermal_fsm__state__now;
+        let v_telemetry__setpoint = v_current_loop__setpoint__now;
+        let n___tick_40 = (if (v___bump_40 >= 40.0_f32) { 0.0_f32 } else { v___bump_40 });
+        let n_position_loop__pid__integral = (if v___fire_40 { (if false { 0.0_f32 } else { (if v_position_loop__pid__deeper { self.position_loop__pid__integral } else { v_position_loop__pid__cand }).max((-8.0_f32)).min(8.0_f32) }) } else { self.position_loop__pid__integral });
+        let n_position_loop__pid__prev_meas = (if v___fire_40 { (if false { 0.0_f32 } else { v_position_loop__pid__meas }) } else { self.position_loop__pid__prev_meas });
+        let n_position_loop__pid__has_prev = (if v___fire_40 { (!false) } else { self.position_loop__pid__has_prev });
+        let n_position_loop__pid__filt = (if v___fire_40 { (if false { 0.0_f32 } else { v_position_loop__pid__filt_d }) } else { self.position_loop__pid__filt });
+        let n_position_loop__pid__filt_init = (if v___fire_40 { (!false) } else { self.position_loop__pid__filt_init });
+        let n_position_loop__amps__held = v_position_loop__amps__now;
+        let n_thermal_fsm__mode = (if v___fire_40 { v_thermal_fsm__state } else { self.thermal_fsm__mode });
+        let n_thermal_fsm__state__held = v_thermal_fsm__state__now;
+        let n_thermal_fsm__scale__held = v_thermal_fsm__scale__now;
+        let n_current_loop__pid__integral = (if v_current_loop__fault { 0.0_f32 } else { (if v_current_loop__pid__deeper { self.current_loop__pid__integral } else { v_current_loop__pid__cand }).max((-24.0_f32)).min(24.0_f32) });
+        let n_current_loop__pid__prev_meas = (if v_current_loop__fault { 0.0_f32 } else { v_current_loop__pid__meas });
+        let n_current_loop__pid__has_prev = (!v_current_loop__fault);
+        let n_current_loop__pid__filt = (if v_current_loop__fault { 0.0_f32 } else { v_current_loop__pid__filt_d });
+        let n_current_loop__pid__filt_init = (!v_current_loop__fault);
+        let out = (v_actuator__volts, v_telemetry__thermal_state, v_telemetry__setpoint,);
+        self.__tick_40 = n___tick_40;
+        self.position_loop__pid__integral = n_position_loop__pid__integral;
+        self.position_loop__pid__prev_meas = n_position_loop__pid__prev_meas;
+        self.position_loop__pid__has_prev = n_position_loop__pid__has_prev;
+        self.position_loop__pid__filt = n_position_loop__pid__filt;
+        self.position_loop__pid__filt_init = n_position_loop__pid__filt_init;
+        self.position_loop__amps__held = n_position_loop__amps__held;
+        self.thermal_fsm__mode = n_thermal_fsm__mode;
+        self.thermal_fsm__state__held = n_thermal_fsm__state__held;
+        self.thermal_fsm__scale__held = n_thermal_fsm__scale__held;
+        self.current_loop__pid__integral = n_current_loop__pid__integral;
+        self.current_loop__pid__prev_meas = n_current_loop__pid__prev_meas;
+        self.current_loop__pid__has_prev = n_current_loop__pid__has_prev;
+        self.current_loop__pid__filt = n_current_loop__pid__filt;
+        self.current_loop__pid__filt_init = n_current_loop__pid__filt_init;
         out
     }
 }

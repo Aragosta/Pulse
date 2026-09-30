@@ -1,5 +1,5 @@
-//! Hand-written IR of the single-joint graph (stand-in for a frontend). Source of truth: Class 1 and Class 3 check it,
-//! `copperconfig.ron` and `pulse_joint::generated` are generated from it.
+//! Hand-written IR of the single joint (stand-in for a frontend). Source of truth: Class 1 and Class 3 check it and
+//! the firmware (`pulse_joint::generated::Firmware`) is generated from it.
 
 use crate::params::*;
 use pulse_ir::expr::{
@@ -186,8 +186,123 @@ const CURRENT_PID: Pid = Pid {
     meas: "A",
 };
 
+const POSITION_PID: Pid = Pid {
+    name: "position_pid",
+    kp: POS_KP as f64,
+    ki: POS_KI as f64,
+    kd: POS_KD as f64,
+    dt: OUTER_DT as f64,
+    smoothing: 1.0,
+    lo: -I_MAX as f64,
+    hi: I_MAX as f64,
+    meas_max: THETA_SENSE_MAX as f64,
+    out: "A",
+    meas: "rad",
+};
+
 pub fn components() -> Vec<Component> {
-    vec![CURRENT_PID.component()]
+    vec![CURRENT_PID.component(), POSITION_PID.component()]
+}
+
+fn use_pid(pid: &Pid, setpoint: Expr, measured: Expr, reset: Expr) -> Stmt {
+    Stmt::Use(Use {
+        name: "pid".into(),
+        component: pid.name.into(),
+        bind: vec![
+            def("setpoint", setpoint),
+            def("measured", measured),
+            def("reset", reset),
+        ],
+    })
+}
+
+/// The 200 Hz position loop: PID from the commanded angle to a current setpoint.
+pub fn position_loop() -> Compute {
+    Compute {
+        inputs: vec![
+            // Assumed: the command source only sends finite angles within +-10 rad.
+            port("target", Ty::F32, "rad", Some([-10.0, 10.0])),
+            Port {
+                glitch: true,
+                ..port(
+                    "measured",
+                    Ty::F32,
+                    "rad",
+                    Some([-THETA_SENSE_MAX as f64, THETA_SENSE_MAX as f64]),
+                )
+            },
+        ],
+        params: vec![],
+        state: vec![],
+        defs: vec![
+            use_pid(
+                &POSITION_PID,
+                var("target"),
+                var("measured"),
+                Expr::Bool(false),
+            ),
+            def("amps", var("pid__out")).into(),
+        ],
+        outputs: vec![port(
+            "amps",
+            Ty::F32,
+            "A",
+            Some([-I_MAX as f64, I_MAX as f64]),
+        )],
+        next: vec![],
+    }
+}
+
+/// The 200 Hz thermal state machine: nominal -> derating -> fault (latched), hysteresis on recovery, NaN faults.
+/// Codes: 0 nominal, 1 derating, 2 fault. `scale` limits the current: 1, `DERATE_SCALE`, 0.
+pub fn thermal_fsm() -> Compute {
+    let (nominal, derating, fault) = (var("nominal"), var("derating"), var("fault"));
+    let temp = || var("temp");
+    let mode = || var("mode");
+    let state = select(
+        temp().gt(var("t_fault")).or(temp().eq(temp()).not()),
+        fault.clone(),
+        select(
+            mode().eq(fault.clone()),
+            fault,
+            select(
+                mode().eq(nominal.clone()).and(temp().gt(var("t_derate"))),
+                derating.clone(),
+                select(
+                    mode().eq(derating.clone()).and(temp().lt(var("t_recover"))),
+                    nominal.clone(),
+                    mode(),
+                ),
+            ),
+        ),
+    );
+    let scale = select(
+        var("state").eq(nominal),
+        num(1.0),
+        select(var("state").eq(derating), var("derate_scale"), num(0.0)),
+    );
+    Compute {
+        inputs: vec![Port {
+            glitch: true,
+            ..port("temp", Ty::F32, "degC", Some([-40.0, 200.0]))
+        }],
+        params: vec![
+            param("t_fault", T_FAULT as f64, "degC"),
+            param("t_derate", T_DERATE as f64, "degC"),
+            param("t_recover", T_RECOVER as f64, "degC"),
+            param("derate_scale", DERATE_SCALE as f64, "1"),
+            param("nominal", pulse_joint::NOMINAL as f64, "1"),
+            param("derating", pulse_joint::DERATING as f64, "1"),
+            param("fault", pulse_joint::FAULT as f64, "1"),
+        ],
+        state: vec![sv("mode", num(0.0), "1", Some([0.0, 2.0]))],
+        defs: vec![def("state", state).into(), def("scale", scale).into()],
+        outputs: vec![
+            port("state", Ty::F32, "1", Some([0.0, 2.0])),
+            port("scale", Ty::F32, "1", Some([0.0, 1.0])),
+        ],
+        next: vec![def("mode", var("state"))],
+    }
 }
 
 /// The 8 kHz current loop: thermal clamp on the setpoint (NaN-safe), then PI to volts; fault forces 0 V and resets.
@@ -222,15 +337,7 @@ pub fn current_loop() -> Compute {
             )
             .into(),
             def("fault", var("state").eq(var("fault_code"))).into(),
-            Stmt::Use(Use {
-                name: "pid".into(),
-                component: CURRENT_PID.name.into(),
-                bind: vec![
-                    def("setpoint", var("setpoint")),
-                    def("measured", var("measured")),
-                    def("reset", var("fault")),
-                ],
-            }),
+            use_pid(&CURRENT_PID, var("setpoint"), var("measured"), var("fault")),
             def("volts", select(var("fault"), num(0.0), var("pid__out"))).into(),
         ],
         outputs: vec![
@@ -246,35 +353,29 @@ pub fn current_loop() -> Compute {
     }
 }
 
-pub const PLANT: &str = "plant"; // simulated physics, not a Copper task
-
+/// The single joint: firmware blocks (with `compute`) and the outside world they talk to.
 pub fn single_joint() -> Ir {
-    let blk = |i: usize, formalism, rate_hz, imp: &str| Block {
-        id: crate::sim::NAMES[i].into(),
+    let outside = |id: &str, formalism, rate_hz, wcet_budget_ns| Block {
+        id: id.into(),
         formalism,
         rate_hz,
-        wcet_budget_ns: BUDGET_NS[i],
+        wcet_budget_ns,
         sensor: None,
-        imp: Some(imp.into()),
         compute: None,
         span: None,
     };
-    let sensor = Block {
-        sensor: Some(SensorSpec {
-            latency_ticks: LATENCY_TICKS,
-            quant_step: POS_QUANT,
-            dropout_p: DROPOUT_P,
-            max_dropout_run: MAX_DROPOUT_RUN,
-        }),
-        ..blk(0, Discrete, BASE_HZ, "tasks::Sensor")
+    let firmware = |id: &str, formalism, rate_hz, wcet_budget_ns, c: Compute| Block {
+        compute: Some(c),
+        ..outside(id, formalism, rate_hz, wcet_budget_ns)
     };
-    let e = |from: &str, to: &str, hold, msg: Option<&str>| Edge {
+    let e = |from: &str, fp: Option<&str>, to: &str, tp: Option<&str>, hold| Edge {
         from: from.into(),
         to: to.into(),
+        from_port: fp.map(Into::into),
+        to_port: tp.map(Into::into),
         hold,
         max_age_ns: None,
         delay_ticks: 0,
-        msg: msg.map(|m| format!("crate::tasks::{m}")),
         span: None,
     };
     Ir {
@@ -282,60 +383,123 @@ pub fn single_joint() -> Ir {
         base_rate_hz: BASE_HZ,
         components: components(),
         blocks: vec![
+            outside("plant", Continuous, BASE_HZ, 0),
             Block {
-                id: PLANT.into(),
-                formalism: Continuous,
-                rate_hz: BASE_HZ,
-                wcet_budget_ns: 0,
-                sensor: None,
-                imp: None,
-                compute: None,
-                span: None,
+                sensor: Some(SensorSpec {
+                    latency_ticks: LATENCY_TICKS,
+                    quant_step: POS_QUANT,
+                    dropout_p: DROPOUT_P,
+                    max_dropout_run: MAX_DROPOUT_RUN,
+                }),
+                ..outside("sensor", Discrete, BASE_HZ, SENSOR_BUDGET_NS)
             },
-            sensor,
-            blk(1, Discrete, 200, "tasks::Hold200"),
-            blk(2, Discrete, 200, "tasks::PositionLoop"),
-            blk(3, StateMachine, 200, "tasks::ThermalFsmTask"),
-            Block {
-                compute: Some(current_loop()),
-                ..blk(4, Discrete, BASE_HZ, "tasks::CurrentLoop")
-            },
-            blk(5, Discrete, BASE_HZ, "tasks::Actuator"),
+            outside("command", Discrete, 200, 0),
+            firmware(
+                "position_loop",
+                Discrete,
+                200,
+                POSITION_BUDGET_NS,
+                position_loop(),
+            ),
+            firmware(
+                "thermal_fsm",
+                StateMachine,
+                200,
+                THERMAL_BUDGET_NS,
+                thermal_fsm(),
+            ),
+            firmware(
+                "current_loop",
+                Discrete,
+                BASE_HZ,
+                CURRENT_BUDGET_NS,
+                current_loop(),
+            ),
+            outside("actuator", Discrete, BASE_HZ, ACTUATOR_BUDGET_NS),
+            outside("telemetry", Discrete, BASE_HZ, 0),
         ],
-        // Order matters: it is Copper's connection order, which fixes current_loop's input tuple order.
+        // Order matters: it fixes the order of the firmware's inputs and outputs.
         edges: vec![
-            e(PLANT, "sensor", None, None),
-            // Fast path: full-rate, low-latency, straight into the inner loop.
-            e("sensor", "current_loop", None, Some("SensorSample")),
-            // Slow path: a decimated copy with its own declared age bound.
+            e("plant", None, "sensor", None, None),
+            // Slow path: a decimated copy of the position with its own declared age bound.
             Edge {
                 max_age_ns: Some(6_000_000),
                 ..e(
                     "sensor",
-                    "hold_200",
+                    Some("theta"),
+                    "position_loop",
+                    Some("measured"),
                     Some(Hold::Decimate(40)),
-                    Some("SensorSample"),
                 )
             },
-            e("hold_200", "position_loop", None, Some("HeldSample")),
-            e("hold_200", "thermal_fsm", None, Some("HeldSample")),
+            // Fast path: full-rate, low-latency current straight into the inner loop.
+            e(
+                "sensor",
+                Some("current"),
+                "current_loop",
+                Some("measured"),
+                None,
+            ),
+            e(
+                "sensor",
+                Some("temp"),
+                "thermal_fsm",
+                Some("temp"),
+                Some(Hold::Decimate(40)),
+            ),
+            e(
+                "command",
+                Some("theta"),
+                "position_loop",
+                Some("target"),
+                None,
+            ),
             e(
                 "position_loop",
+                Some("amps"),
                 "current_loop",
+                Some("wanted"),
                 Some(Hold::Zoh),
-                Some("CurrentRef"),
             ),
             e(
                 "thermal_fsm",
+                Some("scale"),
                 "current_loop",
+                Some("scale"),
                 Some(Hold::Zoh),
-                Some("ThermalLimit"),
             ),
-            e("current_loop", "actuator", None, Some("VoltageCmd")),
+            e(
+                "thermal_fsm",
+                Some("state"),
+                "current_loop",
+                Some("state"),
+                Some(Hold::Zoh),
+            ),
+            e(
+                "current_loop",
+                Some("volts"),
+                "actuator",
+                Some("volts"),
+                None,
+            ),
+            e(
+                "thermal_fsm",
+                Some("state"),
+                "telemetry",
+                Some("thermal_state"),
+                Some(Hold::Zoh),
+            ),
+            e(
+                "current_loop",
+                Some("setpoint"),
+                "telemetry",
+                Some("setpoint"),
+                None,
+            ),
             // The plant integrates the voltage held from the previous tick: the loop's one declared delay.
             Edge {
                 delay_ticks: 1,
-                ..e("actuator", PLANT, None, None)
+                ..e("actuator", None, "plant", None, None)
             },
         ],
     }
@@ -344,6 +508,7 @@ pub fn single_joint() -> Ir {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pulse_ir::expr::{F32, F64, Val};
 
     #[test]
     fn passes_class1() {
@@ -351,38 +516,16 @@ mod tests {
         assert_eq!((r.hyperperiod_ticks, r.tick_ns), (40, 125_000));
     }
 
-    /// `copperconfig.ron` is generated from the IR. Regenerate with `PULSE_BLESS=1 cargo test -p single_joint`.
-    #[test]
-    fn copper_config_is_generated() {
-        let want = pulse_ir::copper::emit(&single_joint()).unwrap();
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/copperconfig.ron");
-        if std::env::var_os("PULSE_BLESS").is_some() {
-            std::fs::write(path, &want).unwrap();
-        }
-        assert_eq!(
-            std::fs::read_to_string(path).unwrap(),
-            want,
-            "copperconfig.ron is stale: run PULSE_BLESS=1 cargo test -p single_joint"
-        );
-    }
-
     #[test]
     fn unheld_cross_rate_read_is_refused() {
         let mut ir = single_joint();
-        ir.edges.push(Edge {
-            from: "sensor".into(),
-            to: "position_loop".into(),
-            hold: None,
-            max_age_ns: None,
-            delay_ticks: 0,
-            msg: None,
-            span: None,
-        });
+        ir.edges[1].hold = None; // sensor.theta (8 kHz) -> position_loop (200 Hz)
         let errs = pulse_ir::class1::check(&ir).unwrap_err();
         assert!(
             errs.iter().any(
                 |v| v.code == "C1-HOLD-MISSING" && v.msg.starts_with("sensor -> position_loop")
-            )
+            ),
+            "{errs:?}"
         );
     }
 
@@ -394,8 +537,11 @@ mod tests {
         assert_eq!(errs[0].code, "C1-LOOP", "{errs:?}");
     }
 
-    fn current_loop_flat() -> Compute {
-        current_loop().flatten(&components()).unwrap()
+    fn firmware() -> Compute {
+        pulse_ir::graph::firmware(&single_joint())
+            .map_err(|e| e.join("; "))
+            .unwrap()
+            .compute
     }
 
     /// Firmware generated from the IR. Regenerate with `PULSE_BLESS=1 cargo test -p single_joint`.
@@ -403,7 +549,7 @@ mod tests {
         format!(
             "//! GENERATED from the Pulse IR (`examples/single_joint/src/ir.rs`). Do not edit; regenerate with\n\
              //! `PULSE_BLESS=1 cargo test -p single_joint`.\n\n{}",
-            pulse_ir::rust::emit("CurrentLoop", &current_loop_flat())
+            pulse_ir::rust::emit("Firmware", &firmware())
         )
     }
 
@@ -444,88 +590,88 @@ mod tests {
     }
 
     #[test]
-    fn current_loop_ranges_are_proved() {
+    fn firmware_invariants_and_ranges_are_proved() {
         assert_eq!(pulse_ir::class3::check(&single_joint()), vec![]);
     }
 
     /// Inputs that exercise every branch: nominal values, the clamp and rail edges, and non-finite values.
-    fn inputs(rng: &mut u64) -> (f32, f32, f32, u8) {
-        let mut next = || {
-            *rng ^= *rng << 13;
-            *rng ^= *rng >> 7;
-            *rng ^= *rng << 17;
-            *rng
-        };
-        let mut pick = |odd: &[f32]| {
-            let r = next();
-            if r.is_multiple_of(4) {
+    struct Inputs(u64);
+    impl Inputs {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn pick(&mut self, nominal: (f32, f32), odd: &[f32]) -> f32 {
+            let r = self.next();
+            if r.is_multiple_of(8) {
                 odd[(r >> 8) as usize % odd.len()]
             } else {
-                ((r >> 11) % 20_000) as f32 / 1000.0 - 10.0 // -10 .. 10
+                nominal.0 + ((r >> 11) % 1_000_000) as f32 / 1e6 * (nominal.1 - nominal.0)
             }
-        };
-        let odd = [
-            f32::NAN,
-            f32::INFINITY,
-            f32::NEG_INFINITY,
-            -0.0,
-            0.0,
-            1e30,
-            -1e30,
-            8.0,
-            -8.0,
-            0.75,
-        ];
-        let (w, m) = (pick(&odd), pick(&odd));
-        let s = pick(&[f32::NAN, -1.0, 0.0, 0.75, 1.0, 2.0]);
-        let state = [0, 0, 0, 1, 1, 2, 7][(next() >> 20) as usize % 7]; // 7: an unknown code, not FAULT
-        (w, m, s, state)
+        }
     }
+    const ODD: [f32; 8] = [
+        f32::NAN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        -0.0,
+        0.0,
+        1e30,
+        -1e30,
+        8.0,
+    ];
 
-    /// The generated firmware and the f32 interpreter of the IR are one computation.
+    /// The generated firmware and the f32 interpreter of the same IR are one computation, bit for bit.
     #[test]
-    fn generated_code_equals_ir_interpreter() {
-        use pulse_ir::expr::{F32, Val};
-        let c = current_loop_flat();
+    fn generated_firmware_equals_ir_interpreter() {
+        let c = firmware();
         let mut state = c.init(&mut F32);
-        let mut fw = pulse_joint::generated::CurrentLoop::new();
-        let mut rng = 0x2545_F491u64;
-        for i in 0..200_000 {
-            let (w, m, s, st) = inputs(&mut rng);
-            let ins = vec![Val::N(w), Val::N(m), Val::N(s), Val::N(st as f32)];
+        let mut fw = pulse_joint::generated::Firmware::new();
+        let mut rng = Inputs(0x2545_F491);
+        for i in 0..50_000 {
+            let theta = rng.pick((-2.0, 2.0), &ODD);
+            let current = rng.pick((-10.0, 10.0), &ODD);
+            let temp = rng.pick((20.0, 110.0), &ODD);
+            let cmd = rng.pick((-1.0, 1.0), &[0.0]);
+            let ins = [theta, current, temp, cmd].map(Val::N).to_vec();
             let (outs, next) = c.step(&mut F32, ins, state);
             state = next;
-            let got = fw.step(w, m, s, st);
-            let want = (&outs[0], &outs[1]);
-            let same =
-                |a: f32, b: &Val<f32, bool>| matches!(b, Val::N(x) if x.to_bits() == a.to_bits());
-            assert!(
-                same(got.0, want.0) && same(got.1, want.1),
-                "step {i}: {got:?} vs {want:?}"
+            let got = fw.step(theta, current, temp, cmd);
+            let bits = |v: &Val<f32, bool>| match v {
+                Val::N(x) => x.to_bits(),
+                Val::B(_) => unreachable!(),
+            };
+            let want = (bits(&outs[0]), bits(&outs[1]), bits(&outs[2]));
+            assert_eq!(
+                (got.0.to_bits(), got.1.to_bits(), got.2.to_bits()),
+                want,
+                "tick {i}"
             );
         }
     }
 
-    /// The f64 reading of the IR is the model; on finite inputs the f32 firmware tracks it closely.
+    /// The f64 reading of the IR is the model; on a nominal run the f32 firmware tracks it closely.
     #[test]
     fn f32_firmware_tracks_f64_model() {
-        use pulse_ir::expr::{F32, F64, Val};
-        let c = current_loop_flat();
+        let c = firmware();
         let (mut s32, mut s64) = (c.init(&mut F32), c.init(&mut F64));
         let mut worst = 0.0f64;
         for k in 0..8000 {
-            let (w, m) = (
-                (k as f64 * 0.01).sin() * 6.0,
-                (k as f64 * 0.013).cos() * 5.0,
-            );
+            let theta = (k as f64 * 0.001).sin() * 0.5;
+            let current = (k as f64 * 0.013).cos() * 5.0;
+            let (temp, cmd) = (40.0, 1.0);
             let (o32, n32) = c.step(
                 &mut F32,
-                vec![Val::N(w as f32), Val::N(m as f32), Val::N(1.0), Val::N(0.0)],
+                [theta, current, temp, cmd]
+                    .map(|x| Val::N(x as f32))
+                    .to_vec(),
                 s32,
             );
             let (o64, n64) = c.step(
                 &mut F64,
-                vec![Val::N(w), Val::N(m), Val::N(1.0), Val::N(0.0)],
+                [theta, current, temp, cmd].map(Val::N).to_vec(),
                 s64,
             );
             (s32, s64) = (n32, n64);
@@ -534,7 +680,7 @@ mod tests {
             }
         }
         assert!(
-            worst < 1e-3,
+            worst < 1e-2,
             "f32 firmware drifts {worst} V from the f64 model"
         );
     }

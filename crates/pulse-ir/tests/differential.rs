@@ -36,7 +36,6 @@ fn random_ir(r: &mut Rng) -> Ir {
                 dropout_p: 0.5,
                 max_dropout_run: r.below(4) as u32,
             }),
-            imp: None,
             compute: None,
             span: None,
         })
@@ -63,7 +62,8 @@ fn random_ir(r: &mut Rng) -> Ir {
                 hold,
                 max_age_ns: None,
                 delay_ticks,
-                msg: None,
+                from_port: None,
+                to_port: None,
                 span: None,
             });
         }
