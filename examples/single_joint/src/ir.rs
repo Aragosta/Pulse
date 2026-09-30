@@ -424,6 +424,25 @@ mod tests {
         );
     }
 
+    /// Units are checked inside components, not just in blocks: a PID gain declared upside down is refused.
+    #[test]
+    fn component_units_are_checked() {
+        let mut ir = single_joint();
+        let kp = ir.components[0]
+            .compute
+            .params
+            .iter_mut()
+            .find(|p| p.name == "kp")
+            .unwrap();
+        kp.unit = Some("A/V".into());
+        let errs = pulse_ir::class1::check(&ir).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|v| v.code == "IR-UNIT" && v.msg.contains("current_pid")),
+            "{errs:?}"
+        );
+    }
+
     #[test]
     fn current_loop_ranges_are_proved() {
         assert_eq!(pulse_ir::class3::check(&single_joint()), vec![]);

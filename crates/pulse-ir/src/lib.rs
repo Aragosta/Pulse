@@ -6,6 +6,7 @@ pub mod class3;
 pub mod copper;
 pub mod expr;
 pub mod rust;
+pub mod units;
 
 use serde::{Deserialize, Serialize};
 
@@ -184,6 +185,9 @@ impl Ir {
                 for e in self.check_compute(c) {
                     bad.push(v("ir", "IR-COMPUTE", format!("{}: {e}", b.id)));
                 }
+                for e in units::check(c, &self.components) {
+                    bad.push(v("ir", "IR-UNIT", format!("{}: {e}", b.id)));
+                }
             }
             if b.imp.as_deref().is_some_and(|p| !is_path(p)) {
                 bad.push(v(
@@ -214,6 +218,9 @@ impl Ir {
                     "IR-COMPUTE",
                     format!("component {}: {e}", comp.name),
                 ));
+            }
+            for e in units::check(&comp.compute, &self.components) {
+                bad.push(v("ir", "IR-UNIT", format!("component {}: {e}", comp.name)));
             }
         }
         for e in &self.edges {
