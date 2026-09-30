@@ -71,6 +71,7 @@ fn random_ir(r: &mut Rng) -> Ir {
     Ir {
         version: IR_VERSION,
         base_rate_hz: base,
+        components: vec![],
         blocks,
         edges,
     }

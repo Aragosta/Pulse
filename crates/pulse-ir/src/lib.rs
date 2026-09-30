@@ -101,6 +101,9 @@ pub struct Ir {
     pub base_rate_hz: u32,
     pub blocks: Vec<Block>,
     pub edges: Vec<Edge>,
+    /// Reusable behaviour that block computes (and other components) instantiate by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<expr::Component>,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -120,6 +123,33 @@ fn is_path(s: &str) -> bool {
 }
 
 impl Ir {
+    /// A block's behaviour with every component inlined: what proofs, the interpreter and codegen read.
+    pub fn flat(&self, c: &expr::Compute) -> Result<expr::Compute, String> {
+        c.flatten(&self.components)
+    }
+
+    /// Names are identifiers without `__` (reserved for flattened names); the flat form is well-typed.
+    fn check_compute(&self, c: &expr::Compute) -> Vec<String> {
+        use expr::Stmt;
+        let mut names: Vec<&str> = c.inputs.iter().map(|p| p.name.as_str()).collect();
+        names.extend(c.params.iter().map(|p| p.name.as_str()));
+        names.extend(c.state.iter().map(|s| s.name.as_str()));
+        names.extend(c.defs.iter().map(|s| match s {
+            Stmt::Let(d) => d.name.as_str(),
+            Stmt::Use(u) => u.name.as_str(),
+        }));
+        let mut bad: Vec<String> = names
+            .iter()
+            .filter(|n| n.contains("__"))
+            .map(|n| format!("{n:?}: `__` is reserved for flattened names"))
+            .collect();
+        match self.flat(c) {
+            Ok(f) => bad.extend(f.validate()),
+            Err(e) => bad.push(e),
+        }
+        bad
+    }
+
     pub fn block(&self, id: &str) -> Option<&Block> {
         self.blocks.iter().find(|b| b.id == id)
     }
@@ -150,14 +180,39 @@ impl Ir {
                     format!("block id {:?} declared twice", b.id),
                 ));
             }
-            for e in b.compute.iter().flat_map(|c| c.validate()) {
-                bad.push(v("ir", "IR-COMPUTE", format!("{}: {e}", b.id)));
+            if let Some(c) = &b.compute {
+                for e in self.check_compute(c) {
+                    bad.push(v("ir", "IR-COMPUTE", format!("{}: {e}", b.id)));
+                }
             }
             if b.imp.as_deref().is_some_and(|p| !is_path(p)) {
                 bad.push(v(
                     "ir",
                     "IR-NAME",
                     format!("{}: imp {:?} is not a Rust path", b.id, b.imp),
+                ));
+            }
+        }
+        for comp in &self.components {
+            if !is_ident(&comp.name)
+                || self
+                    .components
+                    .iter()
+                    .filter(|c| c.name == comp.name)
+                    .count()
+                    > 1
+            {
+                bad.push(v(
+                    "ir",
+                    "IR-NAME",
+                    format!("component {:?}: not a unique identifier", comp.name),
+                ));
+            }
+            for e in self.check_compute(&comp.compute) {
+                bad.push(v(
+                    "ir",
+                    "IR-COMPUTE",
+                    format!("component {}: {e}", comp.name),
                 ));
             }
         }

@@ -2,7 +2,9 @@
 //! `copperconfig.ron` and `pulse_joint::generated` are generated from it.
 
 use crate::params::*;
-use pulse_ir::expr::{Compute, Def, Expr, Port, StateVar, Ty, num, select, var};
+use pulse_ir::expr::{
+    Component, Compute, Def, Expr, Param, Port, StateVar, Stmt, Ty, Use, num, select, var,
+};
 use pulse_ir::{Block, Edge, Formalism::*, Hold, IR_VERSION, Ir, SensorSpec};
 
 fn def(name: &str, expr: Expr) -> Def {
@@ -21,136 +23,182 @@ fn port(name: &str, ty: Ty, unit: &str, range: Option<[f64; 2]>) -> Port {
     }
 }
 
-/// multicalc's `Pid::update`, term for term (same operations in the same order, so f32 results are bit-identical):
-/// derivative on the measurement through a one-pole filter, conditional integration against the output limits.
-/// `reset` returns the controller to its initial state and outputs 0 instead. State: `integral`, `prev_meas`,
-/// `has_prev`, `filt`, `filt_init`. Returns the defs and next-state updates.
+fn param(name: &str, value: f64, unit: &str) -> Param {
+    Param {
+        name: name.into(),
+        value,
+        unit: Some(unit.into()),
+    }
+}
+fn sv(name: &str, init: Expr, unit: &str, range: Option<[f64; 2]>) -> StateVar {
+    StateVar {
+        name: name.into(),
+        init,
+        unit: Some(unit.into()),
+        range,
+    }
+}
+
+/// A PID controller as an IR component: multicalc's `Pid::update` term for term (the same f32 operations in the same
+/// order), plus one fix: a non-finite measurement is replaced by the last good one before use, so a bad sample cannot
+/// reach the state and latch the output (the hand-written loop latched at the rail). Derivative on the measurement
+/// through a one-pole filter; conditional integration against the output limits. `reset` returns it to its initial
+/// state (its output is then the caller's business).
 struct Pid {
+    name: &'static str,
     kp: f64,
     ki: f64,
     kd: f64,
     dt: f64,
     smoothing: f64,
+    /// Output limits, in `out` units.
     lo: f64,
     hi: f64,
+    /// A good measurement is within +-this.
+    meas_max: f64,
+    out: &'static str,
+    meas: &'static str,
 }
+
 impl Pid {
-    /// Invariants proved by `class3`: the integral within the output limits, the stored measurement within
-    /// `meas_max`, the filtered derivative within what that measurement range allows (+ margin).
-    fn state(&self, meas_max: f64) -> Vec<StateVar> {
-        let sv = |name: &str, init: Expr, range: Option<[f64; 2]>| StateVar {
-            name: name.into(),
-            init,
-            range,
-        };
-        let d_max = 2.0 * (2.0 * meas_max / self.dt);
-        vec![
-            sv("integral", num(0.0), Some([self.lo, self.hi])),
-            sv("prev_meas", num(0.0), Some([-meas_max, meas_max])),
-            sv("has_prev", Expr::Bool(false), None),
-            sv("filt", num(0.0), Some([-d_max, d_max])),
-            sv("filt_init", Expr::Bool(false), None),
-        ]
-    }
-    fn update(&self, setpoint: Expr, measured: Expr, reset: Expr) -> (Vec<Def>, Vec<Def>) {
-        let defs = vec![
-            def("error", setpoint - measured.clone()),
-            def("p_term", num(self.kp) * var("error")),
-            def(
-                "raw_d",
-                select(
-                    var("has_prev"),
-                    (var("prev_meas") - measured.clone()) / num(self.dt),
-                    num(0.0),
-                ),
-            ),
-            def(
-                "filt_d",
-                select(
-                    var("filt_init"),
-                    num(self.smoothing) * var("raw_d")
-                        + (num(1.0) - num(self.smoothing)) * var("filt"),
-                    var("raw_d"),
-                ),
-            ),
-            def("d_term", num(self.kd) * var("filt_d")),
-            def(
-                "cand",
-                var("integral") + num(self.ki) * var("error") * num(self.dt),
-            ),
-            def("unsat", var("p_term") + var("cand") + var("d_term")),
-            def("pid_out", var("unsat").max(num(self.lo)).min(num(self.hi))),
-            def(
-                "deeper",
-                (var("unsat").gt(num(self.hi)).and(var("error").gt(num(0.0))))
-                    .or(var("unsat").lt(num(self.lo)).and(var("error").lt(num(0.0)))),
-            ),
-            def("reset", reset),
-        ];
+    fn component(&self) -> Component {
+        let (o, m) = (self.out, self.meas);
+        // Invariants proved by `class3`: the integral within the output limits, the stored measurement within
+        // `meas_max`, the filtered derivative within what that measurement range allows (2x margin).
+        let d_max = 2.0 * (2.0 * self.meas_max / self.dt);
         let or_reset = |e: Expr| select(var("reset"), num(0.0), e);
-        let next = vec![
-            // Conditional integration already keeps the integral inside the output limits (it only grows while the
-            // output is unsaturated), so on finite inputs this clamp never acts. Intervals cannot see that relation;
-            // the clamp states it, and the invariant becomes provable.
-            def(
-                "integral",
-                or_reset(
-                    select(var("deeper"), var("integral"), var("cand"))
-                        .max(num(self.lo))
-                        .min(num(self.hi)),
+        let compute = Compute {
+            inputs: vec![
+                port("setpoint", Ty::F32, m, None),
+                Port {
+                    glitch: true,
+                    ..port(
+                        "measured",
+                        Ty::F32,
+                        m,
+                        Some([-self.meas_max, self.meas_max]),
+                    )
+                },
+                port("reset", Ty::Bool, "1", None),
+            ],
+            params: vec![
+                param("kp", self.kp, &format!("{o}/{m}")),
+                param("ki", self.ki, &format!("{o}/({m}*s)")),
+                param("kd", self.kd, &format!("{o}*s/{m}")),
+                param("dt", self.dt, "s"),
+                param("smoothing", self.smoothing, "1"),
+                param("lo", self.lo, o),
+                param("hi", self.hi, o),
+            ],
+            state: vec![
+                sv("integral", num(0.0), o, Some([self.lo, self.hi])),
+                sv(
+                    "prev_meas",
+                    num(0.0),
+                    m,
+                    Some([-self.meas_max, self.meas_max]),
                 ),
-            ),
-            def("prev_meas", or_reset(measured)),
-            def("has_prev", var("reset").not()),
-            def("filt", or_reset(var("filt_d"))),
-            def("filt_init", var("reset").not()),
-        ];
-        (defs, next)
+                sv("has_prev", Expr::Bool(false), "1", None),
+                sv("filt", num(0.0), &format!("{m}/s"), Some([-d_max, d_max])),
+                sv("filt_init", Expr::Bool(false), "1", None),
+            ],
+            defs: vec![
+                def(
+                    "meas",
+                    select(
+                        var("measured").is_finite(),
+                        var("measured"),
+                        var("prev_meas"),
+                    ),
+                ),
+                def("error", var("setpoint") - var("meas")),
+                def("p_term", var("kp") * var("error")),
+                def(
+                    "raw_d",
+                    select(
+                        var("has_prev"),
+                        (var("prev_meas") - var("meas")) / var("dt"),
+                        num(0.0),
+                    ),
+                ),
+                def(
+                    "filt_d",
+                    select(
+                        var("filt_init"),
+                        var("smoothing") * var("raw_d")
+                            + (num(1.0) - var("smoothing")) * var("filt"),
+                        var("raw_d"),
+                    ),
+                ),
+                def("d_term", var("kd") * var("filt_d")),
+                def(
+                    "cand",
+                    var("integral") + var("ki") * var("error") * var("dt"),
+                ),
+                def("unsat", var("p_term") + var("cand") + var("d_term")),
+                def("out", var("unsat").max(var("lo")).min(var("hi"))),
+                def(
+                    "deeper",
+                    (var("unsat").gt(var("hi")).and(var("error").gt(num(0.0))))
+                        .or(var("unsat").lt(var("lo")).and(var("error").lt(num(0.0)))),
+                ),
+            ]
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+            outputs: vec![port("out", Ty::F32, o, Some([self.lo, self.hi]))],
+            next: vec![
+                // Conditional integration already keeps the integral inside the output limits (it only grows while
+                // the output is unsaturated), so on finite inputs this clamp never acts. Intervals cannot see that
+                // relation; the clamp states it, and the invariant becomes provable.
+                def(
+                    "integral",
+                    or_reset(
+                        select(var("deeper"), var("integral"), var("cand"))
+                            .max(var("lo"))
+                            .min(var("hi")),
+                    ),
+                ),
+                def("prev_meas", or_reset(var("meas"))),
+                def("has_prev", var("reset").not()),
+                def("filt", or_reset(var("filt_d"))),
+                def("filt_init", var("reset").not()),
+            ],
+        };
+        Component {
+            name: self.name.into(),
+            compute,
+        }
     }
+}
+
+const CURRENT_PID: Pid = Pid {
+    name: "current_pid",
+    kp: CUR_KP as f64,
+    ki: CUR_KI as f64,
+    kd: 0.0,
+    dt: DT,
+    smoothing: 1.0,
+    lo: -V_BUS as f64,
+    hi: V_BUS as f64,
+    meas_max: I_SENSE_MAX as f64,
+    out: "V",
+    meas: "A",
+};
+
+pub fn components() -> Vec<Component> {
+    vec![CURRENT_PID.component()]
 }
 
 /// The 8 kHz current loop: thermal clamp on the setpoint (NaN-safe), then PI to volts; fault forces 0 V and resets.
 pub fn current_loop() -> Compute {
     let lim = select(
         var("scale").ge(num(0.0)),
-        num(I_MAX as f64) * var("scale").min(num(1.0)),
+        var("i_max") * var("scale").min(num(1.0)),
         num(0.0),
     );
     let clamp = var("wanted").max(-var("lim")).min(var("lim"));
     let meas_max = I_SENSE_MAX as f64;
-    let pid = Pid {
-        kp: CUR_KP as f64,
-        ki: CUR_KI as f64,
-        kd: 0.0,
-        dt: DT,
-        smoothing: 1.0,
-        lo: -V_BUS as f64,
-        hi: V_BUS as f64,
-    };
-    let (pid_defs, next) = pid.update(
-        var("setpoint"),
-        var("meas"),
-        var("state").eq(num(pulse_joint::FAULT as f64)),
-    );
-    let mut defs = vec![
-        def("lim", lim),
-        def(
-            "setpoint",
-            select(var("wanted").is_finite(), clamp, num(0.0)),
-        ),
-        // A bad current sample (NaN, inf) is replaced by the last good one before anything uses it, so it cannot
-        // reach the controller's state and latch the output (the hand-written loop latched at -24 V).
-        def(
-            "meas",
-            select(
-                var("measured").is_finite(),
-                var("measured"),
-                var("prev_meas"),
-            ),
-        ),
-    ];
-    defs.extend(pid_defs);
-    defs.push(def("volts", select(var("reset"), num(0.0), var("pid_out"))));
     Compute {
         inputs: vec![
             port("wanted", Ty::F32, "A", None),
@@ -159,10 +207,32 @@ pub fn current_loop() -> Compute {
                 ..port("measured", Ty::F32, "A", Some([-meas_max, meas_max]))
             },
             port("scale", Ty::F32, "1", None),
-            port("state", Ty::U8, "thermal state", None),
+            port("state", Ty::U8, "1", None),
         ],
-        state: pid.state(meas_max),
-        defs,
+        params: vec![
+            param("i_max", I_MAX as f64, "A"),
+            param("fault_code", pulse_joint::FAULT as f64, "1"),
+        ],
+        state: vec![],
+        defs: vec![
+            def("lim", lim).into(),
+            def(
+                "setpoint",
+                select(var("wanted").is_finite(), clamp, num(0.0)),
+            )
+            .into(),
+            def("fault", var("state").eq(var("fault_code"))).into(),
+            Stmt::Use(Use {
+                name: "pid".into(),
+                component: CURRENT_PID.name.into(),
+                bind: vec![
+                    def("setpoint", var("setpoint")),
+                    def("measured", var("measured")),
+                    def("reset", var("fault")),
+                ],
+            }),
+            def("volts", select(var("fault"), num(0.0), var("pid__out"))).into(),
+        ],
         outputs: vec![
             port("volts", Ty::F32, "V", Some([-V_BUS as f64, V_BUS as f64])),
             port(
@@ -172,7 +242,7 @@ pub fn current_loop() -> Compute {
                 Some([-I_MAX as f64, I_MAX as f64]),
             ),
         ],
-        next,
+        next: vec![],
     }
 }
 
@@ -210,6 +280,7 @@ pub fn single_joint() -> Ir {
     Ir {
         version: IR_VERSION,
         base_rate_hz: BASE_HZ,
+        components: components(),
         blocks: vec![
             Block {
                 id: PLANT.into(),
@@ -323,12 +394,16 @@ mod tests {
         assert_eq!(errs[0].code, "C1-LOOP", "{errs:?}");
     }
 
+    fn current_loop_flat() -> Compute {
+        current_loop().flatten(&components()).unwrap()
+    }
+
     /// Firmware generated from the IR. Regenerate with `PULSE_BLESS=1 cargo test -p single_joint`.
     pub fn generated_source() -> String {
         format!(
             "//! GENERATED from the Pulse IR (`examples/single_joint/src/ir.rs`). Do not edit; regenerate with\n\
              //! `PULSE_BLESS=1 cargo test -p single_joint`.\n\n{}",
-            pulse_ir::rust::emit("CurrentLoop", &current_loop())
+            pulse_ir::rust::emit("CurrentLoop", &current_loop_flat())
         )
     }
 
@@ -392,7 +467,7 @@ mod tests {
     #[test]
     fn generated_code_equals_ir_interpreter() {
         use pulse_ir::expr::{F32, Val};
-        let c = current_loop();
+        let c = current_loop_flat();
         let mut state = c.init(&mut F32);
         let mut fw = pulse_joint::generated::CurrentLoop::new();
         let mut rng = 0x2545_F491u64;
@@ -416,7 +491,7 @@ mod tests {
     #[test]
     fn f32_firmware_tracks_f64_model() {
         use pulse_ir::expr::{F32, F64, Val};
-        let c = current_loop();
+        let c = current_loop_flat();
         let (mut s32, mut s64) = (c.init(&mut F32), c.init(&mut F64));
         let mut worst = 0.0f64;
         for k in 0..8000 {

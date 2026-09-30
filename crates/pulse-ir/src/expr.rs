@@ -67,6 +67,8 @@ pub struct StateVar {
     pub name: String,
     pub init: Expr,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range: Option<[f64; 2]>,
 }
 
@@ -77,16 +79,58 @@ pub struct Def {
     pub expr: Expr,
 }
 
-/// What a block computes on each firing: `defs` in order (each may use inputs, state and earlier defs); outputs
-/// name a def, input or state; `next` gives new state values (a state not listed keeps its value).
+/// A named constant. Generated code inlines its value, so naming it changes no arithmetic.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Param {
+    pub name: String,
+    pub value: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+}
+
+/// An instance of a library component (`Ir::components`): its inputs bound to expressions in this scope. After
+/// `Compute::flatten` its params, state and defs appear here as `{name}__{x}`; this scope may read only its outputs.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Use {
+    pub name: String,
+    pub component: String,
+    pub bind: Vec<Def>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Stmt {
+    Let(Def),
+    Use(Use),
+}
+impl From<Def> for Stmt {
+    fn from(d: Def) -> Stmt {
+        Stmt::Let(d)
+    }
+}
+
+/// What a block computes on each firing: `defs` in order (each may use inputs, params, state and earlier defs);
+/// outputs name a def, input or state; `next` gives new state values (a state not listed keeps its value).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Compute {
     pub inputs: Vec<Port>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub params: Vec<Param>,
     pub state: Vec<StateVar>,
-    pub defs: Vec<Def>,
+    pub defs: Vec<Stmt>,
     pub outputs: Vec<Port>,
     pub next: Vec<Def>,
+}
+
+/// A reusable piece of behaviour (e.g. a PID), instantiated by `Stmt::Use`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Component {
+    pub name: String,
+    pub compute: Compute,
 }
 
 // ---- building expressions (what a frontend writes) ------------------------------------------------------------------
@@ -266,6 +310,43 @@ impl Expr {
         }
     }
 
+    /// The same expression with every variable replaced by `f(name)`.
+    pub fn map_vars(&self, f: &impl Fn(&str) -> Expr) -> Expr {
+        use Expr::*;
+        let m = |e: &Expr| Box::new(e.map_vars(f));
+        match self {
+            Num(_) | Bool(_) => self.clone(),
+            Var(n) => f(n),
+            Neg(a) => Neg(m(a)),
+            Not(a) => Not(m(a)),
+            IsFinite(a) => IsFinite(m(a)),
+            Add(x, y) => Add(m(x), m(y)),
+            Sub(x, y) => Sub(m(x), m(y)),
+            Mul(x, y) => Mul(m(x), m(y)),
+            Div(x, y) => Div(m(x), m(y)),
+            Max(x, y) => Max(m(x), m(y)),
+            Min(x, y) => Min(m(x), m(y)),
+            Lt(x, y) => Lt(m(x), m(y)),
+            Le(x, y) => Le(m(x), m(y)),
+            Gt(x, y) => Gt(m(x), m(y)),
+            Ge(x, y) => Ge(m(x), m(y)),
+            Eq(x, y) => Eq(m(x), m(y)),
+            And(x, y) => And(m(x), m(y)),
+            Or(x, y) => Or(m(x), m(y)),
+            Select(c, x, y) => Select(m(c), m(x), m(y)),
+        }
+    }
+
+    /// Every variable name the expression reads.
+    pub fn vars(&self) -> Vec<String> {
+        let names = std::cell::RefCell::new(Vec::new());
+        self.map_vars(&|n| {
+            names.borrow_mut().push(n.to_string());
+            var(n)
+        });
+        names.into_inner()
+    }
+
     /// Type of the expression given the types in scope (`U8` reads as `F32`).
     fn ty(&self, scope: &[(&str, Ty)]) -> Result<Ty, String> {
         use Expr::*;
@@ -336,8 +417,15 @@ impl Compute {
             .map(|p| p.name.clone())
             .zip(inputs)
             .collect();
+        for p in &self.params {
+            let v = Val::N(d.num(p.value));
+            env.push((p.name.clone(), v));
+        }
         env.extend(self.state.iter().map(|s| s.name.clone()).zip(state));
-        for def in &self.defs {
+        for stmt in &self.defs {
+            let Stmt::Let(def) = stmt else {
+                panic!("flatten before evaluating");
+            };
             let v = def.expr.eval(d, &env);
             let v = d.bind(false, &def.name, v);
             env.push((def.name.clone(), v));
@@ -359,6 +447,114 @@ impl Compute {
             })
             .collect();
         (outputs, next)
+    }
+
+    /// Inline every component instance (recursively), prefixing its names with `{instance}__`. Everything that
+    /// evaluates, proves or generates code works on the flat form. User names must not contain `__`.
+    pub fn flatten(&self, lib: &[Component]) -> Result<Compute, String> {
+        self.flatten_at(lib, 0)
+    }
+
+    fn flatten_at(&self, lib: &[Component], depth: usize) -> Result<Compute, String> {
+        if depth > 16 {
+            return Err("components nested more than 16 deep (a component uses itself?)".into());
+        }
+        let mut flat = Compute {
+            defs: Vec::new(),
+            ..self.clone()
+        };
+        for stmt in &self.defs {
+            let u = match stmt {
+                Stmt::Let(d) => {
+                    flat.defs.push(Stmt::Let(d.clone()));
+                    continue;
+                }
+                Stmt::Use(u) => u,
+            };
+            let comp = lib
+                .iter()
+                .find(|c| c.name == u.component)
+                .ok_or(format!("{}: no component {:?}", u.name, u.component))?;
+            let c = comp.compute.flatten_at(lib, depth + 1)?;
+            let pre = |n: &str| format!("{}__{n}", u.name);
+            // An input bound to a variable or literal is substituted where it is used (no copy, so a contract on
+            // that variable still reaches the proof); any other binding becomes a def where the instance stands.
+            let mut subst: Vec<(&str, Expr)> = Vec::new();
+            for p in &c.inputs {
+                let b = u
+                    .bind
+                    .iter()
+                    .find(|b| b.name == p.name)
+                    .ok_or(format!("{}: input {} not bound", u.name, p.name))?;
+                if let Expr::Var(_) | Expr::Num(_) | Expr::Bool(_) = b.expr {
+                    subst.push((&p.name, b.expr.clone()));
+                } else {
+                    flat.defs.push(Stmt::Let(Def {
+                        name: pre(&p.name),
+                        expr: b.expr.clone(),
+                    }));
+                }
+            }
+            let rename = |e: &Expr| {
+                e.map_vars(&|n| match subst.iter().find(|(s, _)| *s == n) {
+                    Some((_, e)) => e.clone(),
+                    None => var(&pre(n)),
+                })
+            };
+            if let Some(b) = u
+                .bind
+                .iter()
+                .find(|b| !c.inputs.iter().any(|p| p.name == b.name))
+            {
+                return Err(format!(
+                    "{}: {} is not an input of {}",
+                    u.name, b.name, u.component
+                ));
+            }
+            flat.params.extend(c.params.iter().map(|p| Param {
+                name: pre(&p.name),
+                ..p.clone()
+            }));
+            flat.state.extend(c.state.iter().map(|s| StateVar {
+                name: pre(&s.name),
+                ..s.clone()
+            }));
+            for d in &c.defs {
+                let Stmt::Let(d) = d else {
+                    unreachable!("flattened")
+                };
+                flat.defs.push(Stmt::Let(Def {
+                    name: pre(&d.name),
+                    expr: rename(&d.expr),
+                }));
+            }
+            flat.next.extend(c.next.iter().map(|d| Def {
+                name: pre(&d.name),
+                expr: rename(&d.expr),
+            }));
+            // Encapsulation: this scope reads an instance only through its outputs.
+            let own: Vec<&Expr> = self
+                .defs
+                .iter()
+                .flat_map(|s| match s {
+                    Stmt::Let(d) => vec![&d.expr],
+                    Stmt::Use(o) => o.bind.iter().map(|b| &b.expr).collect(),
+                })
+                .chain(self.next.iter().map(|d| &d.expr))
+                .collect();
+            let reads = own.iter().flat_map(|e| e.vars());
+            for n in reads {
+                if let Some(x) = n.strip_prefix(&format!("{}__", u.name))
+                    && !c.outputs.iter().any(|o| o.name == x)
+                {
+                    return Err(format!(
+                        "reads {n}, but {x} is not an output of {}",
+                        u.component
+                    ));
+                }
+            }
+        }
+        Ok(flat)
     }
 
     /// Initial state, in the order of `self.state`.
@@ -390,6 +586,10 @@ impl Compute {
                 bad.push(format!("input {}: bad range {:?}", p.name, p.range));
             }
         }
+        for p in &self.params {
+            let t = declare(&mut scope, &p.name, Ty::F32, &mut bad);
+            scope.push((&p.name, t));
+        }
         for s in &self.state {
             if bad_range(s.range) {
                 bad.push(format!("state {}: bad range {:?}", s.name, s.range));
@@ -405,7 +605,11 @@ impl Compute {
             let t = declare(&mut scope, &s.name, t, &mut bad);
             scope.push((&s.name, t));
         }
-        for def in &self.defs {
+        for stmt in &self.defs {
+            let Stmt::Let(def) = stmt else {
+                bad.push("component instance not flattened".into());
+                continue;
+            };
             let t = def.expr.ty(&scope).unwrap_or_else(|e| {
                 bad.push(format!("{}: {e}", def.name));
                 Ty::F32
@@ -505,3 +709,137 @@ macro_rules! float_domain {
 }
 float_domain!(F32, f32);
 float_domain!(F64, f64);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn port(name: &str) -> Port {
+        Port {
+            name: name.into(),
+            ty: Ty::F32,
+            unit: None,
+            range: None,
+            glitch: false,
+        }
+    }
+    fn def(name: &str, expr: Expr) -> Def {
+        Def {
+            name: name.into(),
+            expr,
+        }
+    }
+    /// `acc`: out = x * gain + total; total accumulates. One param, one state, one internal def.
+    fn lib() -> Vec<Component> {
+        vec![Component {
+            name: "acc".into(),
+            compute: Compute {
+                inputs: vec![port("x")],
+                params: vec![Param {
+                    name: "gain".into(),
+                    value: 2.0,
+                    unit: None,
+                }],
+                state: vec![StateVar {
+                    name: "total".into(),
+                    init: num(0.0),
+                    unit: None,
+                    range: None,
+                }],
+                defs: vec![
+                    def("scaled", var("x") * var("gain")).into(),
+                    def("out", var("scaled") + var("total")).into(),
+                ],
+                outputs: vec![port("out")],
+                next: vec![def("total", var("out"))],
+            },
+        }]
+    }
+    fn parent(read: &str, bind: Expr) -> Compute {
+        let u = |name: &str, bind: Expr| {
+            Stmt::Use(Use {
+                name: name.into(),
+                component: "acc".into(),
+                bind: vec![def("x", bind)],
+            })
+        };
+        Compute {
+            inputs: vec![port("a")],
+            params: vec![],
+            state: vec![],
+            defs: vec![
+                u("p", bind.clone()),
+                u("q", bind),
+                def("y", var(read) + var("q__out")).into(),
+            ],
+            outputs: vec![port("y")],
+            next: vec![],
+        }
+    }
+
+    #[test]
+    fn two_instances_keep_separate_state() {
+        let flat = parent("p__out", var("a")).flatten(&lib()).unwrap();
+        assert!(flat.validate().is_empty(), "{:?}", flat.validate());
+        let mut state = flat.init(&mut F64);
+        let mut ys = Vec::new();
+        for a in [1.0, 1.0, 1.0] {
+            let (out, next) = flat.step(&mut F64, vec![Val::N(a)], state);
+            state = next;
+            ys.push(out[0].clone());
+        }
+        // Each instance: 2, 4, 6. Their sum: 4, 8, 12.
+        assert_eq!(ys, [4.0, 8.0, 12.0].map(Val::N));
+    }
+
+    #[test]
+    fn composite_binding_becomes_a_def_simple_one_is_substituted() {
+        let flat = parent("p__out", var("a") + num(1.0))
+            .flatten(&lib())
+            .unwrap();
+        let names: Vec<_> = flat
+            .defs
+            .iter()
+            .map(|s| match s {
+                Stmt::Let(d) => d.name.as_str(),
+                Stmt::Use(_) => "use",
+            })
+            .collect();
+        assert_eq!(names[0], "p__x");
+        let flat = parent("p__out", var("a")).flatten(&lib()).unwrap();
+        assert!(
+            flat.defs
+                .iter()
+                .all(|s| !matches!(s, Stmt::Let(d) if d.name == "p__x"))
+        );
+    }
+
+    #[test]
+    fn misuse_is_refused() {
+        let e = parent("p__scaled", var("a")).flatten(&lib()).unwrap_err();
+        assert!(e.contains("not an output"), "{e}");
+        let with = |f: &dyn Fn(&mut Use)| {
+            let mut c = parent("p__out", var("a"));
+            let Stmt::Use(u) = &mut c.defs[0] else {
+                unreachable!()
+            };
+            f(u);
+            c.flatten(&lib()).unwrap_err()
+        };
+        assert!(with(&|u| u.bind.clear()).contains("not bound"));
+        assert!(with(&|u| u.bind.push(def("nope", var("a")))).contains("not an input"));
+        assert!(with(&|u| u.component = "missing".into()).contains("no component"));
+        let mut rec = lib();
+        rec[0].compute.defs.push(Stmt::Use(Use {
+            name: "me".into(),
+            component: "acc".into(),
+            bind: vec![def("x", var("x"))],
+        }));
+        assert!(
+            parent("p__out", var("a"))
+                .flatten(&rec)
+                .unwrap_err()
+                .contains("deep")
+        );
+    }
+}

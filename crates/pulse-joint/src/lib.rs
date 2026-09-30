@@ -5,8 +5,9 @@
 
 // Generated from the IR, never hand-edited. Parentheses fix evaluation order; `x.max(lo).min(hi)` and `(1 - 1) * x`
 // are deliberate (`clamp` panics on NaN bounds; `0 * x` is NaN when `x` is), so lints that would rewrite them are off.
+// `a__b` names are flattened component names (`__` keeps them unambiguous).
 #[rustfmt::skip]
-#[allow(unused_parens, clippy::double_parens, clippy::manual_clamp, clippy::eq_op)]
+#[allow(unused_parens, non_snake_case, clippy::double_parens, clippy::manual_clamp, clippy::eq_op)]
 pub mod generated;
 pub mod params;
 

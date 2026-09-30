@@ -254,6 +254,7 @@ mod tests {
         Ir {
             version: IR_VERSION,
             base_rate_hz: 8000,
+            components: vec![],
             blocks: vec![fast, blk("slow", 200, 30_000), blk("sink", 8000, 10_000)],
             edges: vec![
                 edge("fast", "slow", Some(Hold::Decimate(40))),

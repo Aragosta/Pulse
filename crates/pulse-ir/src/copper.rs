@@ -77,6 +77,7 @@ mod tests {
         let mut ir = Ir {
             version: IR_VERSION,
             base_rate_hz: 100,
+            components: vec![],
             blocks: vec![
                 blk("plant", None),
                 blk("a", Some("t::A")),

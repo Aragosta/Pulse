@@ -344,6 +344,7 @@ pub fn check(ir: &Ir) -> Vec<Violation> {
     let mut bad = Vec::new();
     for blk in &ir.blocks {
         let Some(c) = &blk.compute else { continue };
+        let Ok(c) = &ir.flat(c) else { continue }; // reported by `Ir::validate`
         let (outs, next) = step_intervals(c);
         let init = c.init(&mut Intervals::default());
         for ((s, n), i) in c.state.iter().zip(next).zip(init) {
@@ -478,12 +479,14 @@ mod tests {
                     glitch: false,
                 })
                 .into(),
+            params: vec![],
             state: vec![],
             defs: vec![
                 Def {
                     name: "lim".into(),
                     expr: lim,
-                },
+                }
+                .into(),
                 Def {
                     name: "setpoint".into(),
                     expr: if guarded {
@@ -491,7 +494,8 @@ mod tests {
                     } else {
                         clamp
                     },
-                },
+                }
+                .into(),
             ],
             outputs: vec![Port {
                 name: "setpoint".into(),
