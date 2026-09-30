@@ -70,7 +70,13 @@ pub fn check(ir: &Ir) -> Result<Report, Vec<Violation>> {
     // 2. Every cross-rate edge carries a declared, direction- and factor-correct hold.
     let mut staleness = Vec::new();
     for e in &ir.edges {
-        let name = format!("{} -> {}", e.from, e.to);
+        let end =
+            |b: &str, p: &Option<String>| p.as_ref().map_or(b.to_string(), |p| format!("{b}.{p}"));
+        let name = format!(
+            "{} -> {}",
+            end(&e.from, &e.from_port),
+            end(&e.to, &e.to_port)
+        );
         let (Some(f), Some(t)) = (ir.block(&e.from), ir.block(&e.to)) else {
             bad.push(v("edge", "C1-EDGE", format!("{name}: unknown block")));
             continue;

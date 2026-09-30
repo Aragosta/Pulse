@@ -17,6 +17,8 @@ Facts are marked **verified** (checked against a source, linked) or **unverified
 
 **Found while writing it down.** A delay on an edge into firmware would have been silently ignored (the step has no delay buffers): now refused. A range bound that is not an f32 number made a held state fail its own invariant: ranges now mean their f32 hull, on entry and on check.
 
+**Review (2026-09-30).** Two false rejections fixed (a component output passing an input through; a slow block's held output starting outside its range). The position command is now enforced (clamped to +-10 rad, NaN/inf holds the last good target) instead of assumed, so evidence assumes nothing about it: the shape a learned policy's commands need. Class 1's age bounds are now also tested against the executed `graph::firmware` (300 random multi-rate firmwares whose blocks record firing ticks and read stamps: every observed age <= derived, >= 90% reach it); breaking the counter wrap or the output hold is caught, a uniform phase shift of all slow rates leaves ages unchanged and is caught by the schedule test instead. Report edge names include ports.
+
 **Limits.** Components are proved per parameter set (flattened), not once generically. Invariants are non-relational, so relations must be stated (the integrator clamp). Delays and phase offsets inside firmware are not supported yet. Codegen equals the interpreter by construction and by test, not by proof.
 
 ### D-007: Behaviour lives in the IR; one walk, many interpretations (Decided, 2026-09-30)

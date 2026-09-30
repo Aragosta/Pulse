@@ -187,3 +187,159 @@ fn simulated_ages_and_tick_costs_never_exceed_what_class1_derives() {
         "bound reached on only {tight}/{edges} edges"
     );
 }
+
+// ---- Class 1 against the executed firmware -------------------------------------------------------------------------
+
+use pulse_ir::expr::{Compute, Def, F64, Port, Ty, Val, var};
+use pulse_ir::graph;
+
+/// Random firmware in which every block records when it fired (`stamp`, read from an outside clock) and the stamp it
+/// read from each producer (`seen_{edge}`). Executing `graph::firmware` then shows the real age of every read.
+fn stamped_ir(r: &mut Rng) -> Ir {
+    let base = [1000, 8000, 10_000][r.below(3) as usize];
+    let periods = [1, 2, 4, 5, 8, 10, 20, 40];
+    let n = 2 + r.below(4) as usize;
+    let rate: Vec<u32> = (0..n)
+        .map(|_| base / periods[r.below(periods.len() as u64) as usize])
+        .collect();
+    let hold = |f: u32, t: u32| match f.cmp(&t) {
+        std::cmp::Ordering::Equal => Some(None),
+        std::cmp::Ordering::Less => Some(Some(Hold::Zoh)),
+        _ if f.is_multiple_of(t) => Some(Some(Hold::Decimate(f / t))),
+        _ => None,
+    };
+    let port = |name: &str| Port {
+        name: name.into(),
+        ty: Ty::F32,
+        unit: Some("1".into()),
+        range: None,
+        glitch: false,
+    };
+    let edge = |from: String, fp: &str, to: String, tp: &str, hold| Edge {
+        from,
+        to,
+        from_port: Some(fp.into()),
+        to_port: Some(tp.into()),
+        hold,
+        max_age_ns: None,
+        delay_ticks: 0,
+        span: None,
+    };
+    let mut edges = Vec::new();
+    let mut inputs: Vec<Vec<String>> = vec![Vec::new(); n];
+    for j in 0..n {
+        edges.push(edge(
+            "clk".into(),
+            "t",
+            format!("b{j}"),
+            "clk",
+            hold(base, rate[j]).unwrap(),
+        ));
+        for i in 0..j {
+            if r.below(2) == 0
+                && let Some(h) = hold(rate[i], rate[j])
+            {
+                let tp = format!("e{}", edges.len());
+                edges.push(edge(format!("b{i}"), "stamp", format!("b{j}"), &tp, h));
+                inputs[j].push(tp);
+            }
+        }
+    }
+    let block = |id: String, rate_hz, compute| Block {
+        id,
+        formalism: Formalism::Discrete,
+        rate_hz,
+        wcet_budget_ns: 0,
+        sensor: None,
+        span: None,
+        compute,
+    };
+    let mut blocks = vec![block("clk".into(), base, None)];
+    for j in 0..n {
+        let mut defs = vec![
+            Def {
+                name: "stamp".into(),
+                expr: var("clk"),
+            }
+            .into(),
+        ];
+        let mut outputs = vec![port("stamp")];
+        let mut ins = vec![port("clk")];
+        for e in &inputs[j] {
+            ins.push(port(e));
+            defs.push(
+                Def {
+                    name: format!("seen_{e}"),
+                    expr: var(e),
+                }
+                .into(),
+            );
+            outputs.push(port(&format!("seen_{e}")));
+        }
+        let c = Compute {
+            inputs: ins,
+            params: vec![],
+            state: vec![],
+            defs,
+            outputs,
+            next: vec![],
+        };
+        blocks.push(block(format!("b{j}"), rate[j], Some(c)));
+    }
+    Ir {
+        version: IR_VERSION,
+        base_rate_hz: base,
+        blocks,
+        edges,
+        components: vec![],
+    }
+}
+
+#[test]
+fn class1_ages_hold_for_the_executed_firmware() {
+    let mut r = Rng(0xD1B5_4A32_D192_ED03);
+    let (mut edges, mut tight) = (0, 0);
+    for case in 0..300 {
+        let ir = stamped_ir(&mut r);
+        let rep = class1::check(&ir).unwrap_or_else(|e| panic!("case {case}: {e:?}"));
+        let fw = graph::firmware(&ir).unwrap_or_else(|e| panic!("case {case}: {e:?}"));
+        let mut c = fw.compute;
+        c.outputs = fw.probes;
+        // Which probe shows each edge's read: the consumer's stamp for the clock, its seen_ for a block.
+        let probe: Vec<usize> = ir
+            .edges
+            .iter()
+            .map(|e| {
+                let name = match e.from.as_str() {
+                    "clk" => format!("{}__stamp__now", e.to),
+                    _ => format!("{}__seen_{}__now", e.to, e.to_port.as_ref().unwrap()),
+                };
+                c.outputs.iter().position(|p| p.name == name).unwrap()
+            })
+            .collect();
+        let mut state = c.init(&mut F64);
+        let mut worst = vec![0u64; ir.edges.len()];
+        for k in 0..(20 * rep.hyperperiod_ticks as u64 + 50) {
+            let (out, next) = c.step(&mut F64, vec![Val::N(k as f64)], state);
+            state = next;
+            for (i, &p) in probe.iter().enumerate() {
+                let Val::N(t) = out[p] else { unreachable!() };
+                worst[i] = worst[i].max(k + 1 - t as u64); // age at the end of tick k
+            }
+        }
+        for (s, w) in rep.staleness.iter().zip(&worst) {
+            let derived = s.worst_age_ns / rep.tick_ns;
+            assert!(
+                *w <= derived,
+                "case {case}: {} observed {w} ticks > derived {derived}\n{ir:?}",
+                s.edge
+            );
+            edges += 1;
+            tight += (*w == derived) as u32;
+        }
+    }
+    assert!(
+        tight * 10 >= edges * 9,
+        "bound reached on only {tight}/{edges} edges"
+    );
+}

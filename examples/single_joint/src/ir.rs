@@ -531,9 +531,8 @@ mod tests {
         ir.edges[1].hold = None; // sensor.theta (8 kHz) -> position_loop (200 Hz)
         let errs = pulse_ir::class1::check(&ir).unwrap_err();
         assert!(
-            errs.iter().any(
-                |v| v.code == "C1-HOLD-MISSING" && v.msg.starts_with("sensor -> position_loop")
-            ),
+            errs.iter().any(|v| v.code == "C1-HOLD-MISSING"
+                && v.msg.starts_with("sensor.theta -> position_loop.measured")),
             "{errs:?}"
         );
     }
