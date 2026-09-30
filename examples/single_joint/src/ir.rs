@@ -583,6 +583,21 @@ mod tests {
         );
     }
 
+    /// The IR as the JSON a frontend or agent writes; `pulse check`/`pulse gen` and their tests read this file.
+    #[test]
+    fn ir_json_is_current() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/single_joint.ir.json");
+        let want = serde_json::to_string_pretty(&single_joint()).unwrap() + "\n";
+        if std::env::var_os("PULSE_BLESS").is_some() {
+            std::fs::write(path, &want).unwrap();
+        }
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            want,
+            "single_joint.ir.json is stale: run PULSE_BLESS=1 cargo test -p single_joint"
+        );
+    }
+
     /// Units are checked inside components, not just in blocks: a PID gain declared upside down is refused.
     #[test]
     fn component_units_are_checked() {

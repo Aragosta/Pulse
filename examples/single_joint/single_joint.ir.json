@@ -1,0 +1,1592 @@
+{
+  "version": 4,
+  "base_rate_hz": 8000,
+  "blocks": [
+    {
+      "id": "plant",
+      "formalism": "Continuous",
+      "rate_hz": 8000,
+      "wcet_budget_ns": 0,
+      "sensor": null
+    },
+    {
+      "id": "sensor",
+      "formalism": "Discrete",
+      "rate_hz": 8000,
+      "wcet_budget_ns": 15000,
+      "sensor": {
+        "latency_ticks": 2,
+        "quant_step": 0.0015339808,
+        "dropout_p": 0.02,
+        "max_dropout_run": 3
+      }
+    },
+    {
+      "id": "command",
+      "formalism": "Discrete",
+      "rate_hz": 200,
+      "wcet_budget_ns": 0,
+      "sensor": null
+    },
+    {
+      "id": "position_loop",
+      "formalism": "Discrete",
+      "rate_hz": 200,
+      "wcet_budget_ns": 20000,
+      "sensor": null,
+      "compute": {
+        "inputs": [
+          {
+            "name": "target",
+            "ty": "F32",
+            "unit": "rad"
+          },
+          {
+            "name": "measured",
+            "ty": "F32",
+            "unit": "rad",
+            "range": [
+              -100.0,
+              100.0
+            ],
+            "glitch": true
+          }
+        ],
+        "params": [
+          {
+            "name": "cmd_max",
+            "value": 10.0,
+            "unit": "rad"
+          }
+        ],
+        "state": [
+          {
+            "name": "last_target",
+            "init": {
+              "Num": 0.0
+            },
+            "unit": "rad",
+            "range": [
+              -10.0,
+              10.0
+            ]
+          }
+        ],
+        "defs": [
+          {
+            "name": "tgt",
+            "expr": {
+              "Select": [
+                {
+                  "IsFinite": {
+                    "Var": "target"
+                  }
+                },
+                {
+                  "Min": [
+                    {
+                      "Max": [
+                        {
+                          "Var": "target"
+                        },
+                        {
+                          "Neg": {
+                            "Var": "cmd_max"
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "Var": "cmd_max"
+                    }
+                  ]
+                },
+                {
+                  "Var": "last_target"
+                }
+              ]
+            }
+          },
+          {
+            "name": "pid",
+            "component": "position_pid",
+            "bind": [
+              {
+                "name": "setpoint",
+                "expr": {
+                  "Var": "tgt"
+                }
+              },
+              {
+                "name": "measured",
+                "expr": {
+                  "Var": "measured"
+                }
+              },
+              {
+                "name": "reset",
+                "expr": {
+                  "Bool": false
+                }
+              }
+            ]
+          },
+          {
+            "name": "amps",
+            "expr": {
+              "Var": "pid__out"
+            }
+          }
+        ],
+        "outputs": [
+          {
+            "name": "amps",
+            "ty": "F32",
+            "unit": "A",
+            "range": [
+              -8.0,
+              8.0
+            ]
+          }
+        ],
+        "next": [
+          {
+            "name": "last_target",
+            "expr": {
+              "Var": "tgt"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "thermal_fsm",
+      "formalism": "StateMachine",
+      "rate_hz": 200,
+      "wcet_budget_ns": 10000,
+      "sensor": null,
+      "compute": {
+        "inputs": [
+          {
+            "name": "temp",
+            "ty": "F32",
+            "unit": "degC",
+            "range": [
+              -40.0,
+              200.0
+            ],
+            "glitch": true
+          }
+        ],
+        "params": [
+          {
+            "name": "t_fault",
+            "value": 100.0,
+            "unit": "degC"
+          },
+          {
+            "name": "t_derate",
+            "value": 80.0,
+            "unit": "degC"
+          },
+          {
+            "name": "t_recover",
+            "value": 70.0,
+            "unit": "degC"
+          },
+          {
+            "name": "derate_scale",
+            "value": 0.75,
+            "unit": "1"
+          }
+        ],
+        "state": [],
+        "defs": [
+          {
+            "state": "mode",
+            "next": "state",
+            "states": [
+              "nominal",
+              "derating",
+              "fault"
+            ],
+            "initial": "nominal",
+            "transitions": [
+              {
+                "to": "fault",
+                "guard": {
+                  "Or": [
+                    {
+                      "Gt": [
+                        {
+                          "Var": "temp"
+                        },
+                        {
+                          "Var": "t_fault"
+                        }
+                      ]
+                    },
+                    {
+                      "Not": {
+                        "Eq": [
+                          {
+                            "Var": "temp"
+                          },
+                          {
+                            "Var": "temp"
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "from": [
+                  "nominal"
+                ],
+                "to": "derating",
+                "guard": {
+                  "Gt": [
+                    {
+                      "Var": "temp"
+                    },
+                    {
+                      "Var": "t_derate"
+                    }
+                  ]
+                }
+              },
+              {
+                "from": [
+                  "derating"
+                ],
+                "to": "nominal",
+                "guard": {
+                  "Lt": [
+                    {
+                      "Var": "temp"
+                    },
+                    {
+                      "Var": "t_recover"
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "scale",
+            "expr": {
+              "Select": [
+                {
+                  "Eq": [
+                    {
+                      "Var": "state"
+                    },
+                    {
+                      "Var": "nominal"
+                    }
+                  ]
+                },
+                {
+                  "Num": 1.0
+                },
+                {
+                  "Select": [
+                    {
+                      "Eq": [
+                        {
+                          "Var": "state"
+                        },
+                        {
+                          "Var": "derating"
+                        }
+                      ]
+                    },
+                    {
+                      "Var": "derate_scale"
+                    },
+                    {
+                      "Num": 0.0
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "outputs": [
+          {
+            "name": "state",
+            "ty": "F32",
+            "unit": "1",
+            "range": [
+              0.0,
+              2.0
+            ]
+          },
+          {
+            "name": "scale",
+            "ty": "F32",
+            "unit": "1",
+            "range": [
+              0.0,
+              1.0
+            ]
+          }
+        ],
+        "next": []
+      }
+    },
+    {
+      "id": "current_loop",
+      "formalism": "Discrete",
+      "rate_hz": 8000,
+      "wcet_budget_ns": 30000,
+      "sensor": null,
+      "compute": {
+        "inputs": [
+          {
+            "name": "wanted",
+            "ty": "F32",
+            "unit": "A"
+          },
+          {
+            "name": "measured",
+            "ty": "F32",
+            "unit": "A",
+            "range": [
+              -64.0,
+              64.0
+            ],
+            "glitch": true
+          },
+          {
+            "name": "scale",
+            "ty": "F32",
+            "unit": "1"
+          },
+          {
+            "name": "state",
+            "ty": "U8",
+            "unit": "1"
+          }
+        ],
+        "params": [
+          {
+            "name": "i_max",
+            "value": 8.0,
+            "unit": "A"
+          },
+          {
+            "name": "fault_code",
+            "value": 2.0,
+            "unit": "1"
+          }
+        ],
+        "state": [],
+        "defs": [
+          {
+            "name": "lim",
+            "expr": {
+              "Select": [
+                {
+                  "Ge": [
+                    {
+                      "Var": "scale"
+                    },
+                    {
+                      "Num": 0.0
+                    }
+                  ]
+                },
+                {
+                  "Mul": [
+                    {
+                      "Var": "i_max"
+                    },
+                    {
+                      "Min": [
+                        {
+                          "Var": "scale"
+                        },
+                        {
+                          "Num": 1.0
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Num": 0.0
+                }
+              ]
+            }
+          },
+          {
+            "name": "setpoint",
+            "expr": {
+              "Select": [
+                {
+                  "IsFinite": {
+                    "Var": "wanted"
+                  }
+                },
+                {
+                  "Min": [
+                    {
+                      "Max": [
+                        {
+                          "Var": "wanted"
+                        },
+                        {
+                          "Neg": {
+                            "Var": "lim"
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "Var": "lim"
+                    }
+                  ]
+                },
+                {
+                  "Num": 0.0
+                }
+              ]
+            }
+          },
+          {
+            "name": "fault",
+            "expr": {
+              "Eq": [
+                {
+                  "Var": "state"
+                },
+                {
+                  "Var": "fault_code"
+                }
+              ]
+            }
+          },
+          {
+            "name": "pid",
+            "component": "current_pid",
+            "bind": [
+              {
+                "name": "setpoint",
+                "expr": {
+                  "Var": "setpoint"
+                }
+              },
+              {
+                "name": "measured",
+                "expr": {
+                  "Var": "measured"
+                }
+              },
+              {
+                "name": "reset",
+                "expr": {
+                  "Var": "fault"
+                }
+              }
+            ]
+          },
+          {
+            "name": "volts",
+            "expr": {
+              "Select": [
+                {
+                  "Var": "fault"
+                },
+                {
+                  "Num": 0.0
+                },
+                {
+                  "Var": "pid__out"
+                }
+              ]
+            }
+          }
+        ],
+        "outputs": [
+          {
+            "name": "volts",
+            "ty": "F32",
+            "unit": "V",
+            "range": [
+              -24.0,
+              24.0
+            ]
+          },
+          {
+            "name": "setpoint",
+            "ty": "F32",
+            "unit": "A",
+            "range": [
+              -8.0,
+              8.0
+            ]
+          }
+        ],
+        "next": []
+      }
+    },
+    {
+      "id": "actuator",
+      "formalism": "Discrete",
+      "rate_hz": 8000,
+      "wcet_budget_ns": 10000,
+      "sensor": null
+    },
+    {
+      "id": "telemetry",
+      "formalism": "Discrete",
+      "rate_hz": 8000,
+      "wcet_budget_ns": 0,
+      "sensor": null
+    }
+  ],
+  "edges": [
+    {
+      "from": "plant",
+      "to": "sensor",
+      "hold": null,
+      "max_age_ns": null
+    },
+    {
+      "from": "sensor",
+      "to": "position_loop",
+      "hold": {
+        "Decimate": 40
+      },
+      "max_age_ns": 6000000,
+      "from_port": "theta",
+      "to_port": "measured"
+    },
+    {
+      "from": "sensor",
+      "to": "current_loop",
+      "hold": null,
+      "max_age_ns": null,
+      "from_port": "current",
+      "to_port": "measured"
+    },
+    {
+      "from": "sensor",
+      "to": "thermal_fsm",
+      "hold": {
+        "Decimate": 40
+      },
+      "max_age_ns": null,
+      "from_port": "temp",
+      "to_port": "temp"
+    },
+    {
+      "from": "command",
+      "to": "position_loop",
+      "hold": null,
+      "max_age_ns": null,
+      "from_port": "theta",
+      "to_port": "target"
+    },
+    {
+      "from": "position_loop",
+      "to": "current_loop",
+      "hold": "Zoh",
+      "max_age_ns": null,
+      "from_port": "amps",
+      "to_port": "wanted"
+    },
+    {
+      "from": "thermal_fsm",
+      "to": "current_loop",
+      "hold": "Zoh",
+      "max_age_ns": null,
+      "from_port": "scale",
+      "to_port": "scale"
+    },
+    {
+      "from": "thermal_fsm",
+      "to": "current_loop",
+      "hold": "Zoh",
+      "max_age_ns": null,
+      "from_port": "state",
+      "to_port": "state"
+    },
+    {
+      "from": "current_loop",
+      "to": "actuator",
+      "hold": null,
+      "max_age_ns": null,
+      "from_port": "volts",
+      "to_port": "volts"
+    },
+    {
+      "from": "thermal_fsm",
+      "to": "telemetry",
+      "hold": "Zoh",
+      "max_age_ns": null,
+      "from_port": "state",
+      "to_port": "thermal_state"
+    },
+    {
+      "from": "current_loop",
+      "to": "telemetry",
+      "hold": null,
+      "max_age_ns": null,
+      "from_port": "setpoint",
+      "to_port": "setpoint"
+    },
+    {
+      "from": "actuator",
+      "to": "plant",
+      "hold": null,
+      "max_age_ns": null,
+      "delay_ticks": 1
+    }
+  ],
+  "components": [
+    {
+      "name": "current_pid",
+      "compute": {
+        "inputs": [
+          {
+            "name": "setpoint",
+            "ty": "F32",
+            "unit": "A"
+          },
+          {
+            "name": "measured",
+            "ty": "F32",
+            "unit": "A",
+            "range": [
+              -64.0,
+              64.0
+            ],
+            "glitch": true
+          },
+          {
+            "name": "reset",
+            "ty": "Bool",
+            "unit": "1"
+          }
+        ],
+        "params": [
+          {
+            "name": "kp",
+            "value": 1.2599999904632568,
+            "unit": "V/A"
+          },
+          {
+            "name": "ki",
+            "value": 1257.0,
+            "unit": "V/(A*s)"
+          },
+          {
+            "name": "kd",
+            "value": 0.0,
+            "unit": "V*s/A"
+          },
+          {
+            "name": "dt",
+            "value": 0.000125,
+            "unit": "s"
+          },
+          {
+            "name": "smoothing",
+            "value": 1.0,
+            "unit": "1"
+          },
+          {
+            "name": "lo",
+            "value": -24.0,
+            "unit": "V"
+          },
+          {
+            "name": "hi",
+            "value": 24.0,
+            "unit": "V"
+          }
+        ],
+        "state": [
+          {
+            "name": "integral",
+            "init": {
+              "Num": 0.0
+            },
+            "unit": "V",
+            "range": [
+              -24.0,
+              24.0
+            ]
+          },
+          {
+            "name": "prev_meas",
+            "init": {
+              "Num": 0.0
+            },
+            "unit": "A",
+            "range": [
+              -64.0,
+              64.0
+            ]
+          },
+          {
+            "name": "has_prev",
+            "init": {
+              "Bool": false
+            },
+            "unit": "1"
+          },
+          {
+            "name": "filt",
+            "init": {
+              "Num": 0.0
+            },
+            "unit": "A/s",
+            "range": [
+              -2048000.0,
+              2048000.0
+            ]
+          },
+          {
+            "name": "filt_init",
+            "init": {
+              "Bool": false
+            },
+            "unit": "1"
+          }
+        ],
+        "defs": [
+          {
+            "name": "meas",
+            "expr": {
+              "Select": [
+                {
+                  "IsFinite": {
+                    "Var": "measured"
+                  }
+                },
+                {
+                  "Var": "measured"
+                },
+                {
+                  "Var": "prev_meas"
+                }
+              ]
+            }
+          },
+          {
+            "name": "error",
+            "expr": {
+              "Sub": [
+                {
+                  "Var": "setpoint"
+                },
+                {
+                  "Var": "meas"
+                }
+              ]
+            }
+          },
+          {
+            "name": "p_term",
+            "expr": {
+              "Mul": [
+                {
+                  "Var": "kp"
+                },
+                {
+                  "Var": "error"
+                }
+              ]
+            }
+          },
+          {
+            "name": "raw_d",
+            "expr": {
+              "Select": [
+                {
+                  "Var": "has_prev"
+                },
+                {
+                  "Div": [
+                    {
+                      "Sub": [
+                        {
+                          "Var": "prev_meas"
+                        },
+                        {
+                          "Var": "meas"
+                        }
+                      ]
+                    },
+                    {
+                      "Var": "dt"
+                    }
+                  ]
+                },
+                {
+                  "Num": 0.0
+                }
+              ]
+            }
+          },
+          {
+            "name": "filt_d",
+            "expr": {
+              "Select": [
+                {
+                  "Var": "filt_init"
+                },
+                {
+                  "Add": [
+                    {
+                      "Mul": [
+                        {
+                          "Var": "smoothing"
+                        },
+                        {
+                          "Var": "raw_d"
+                        }
+                      ]
+                    },
+                    {
+                      "Mul": [
+                        {
+                          "Sub": [
+                            {
+                              "Num": 1.0
+                            },
+                            {
+                              "Var": "smoothing"
+                            }
+                          ]
+                        },
+                        {
+                          "Var": "filt"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Var": "raw_d"
+                }
+              ]
+            }
+          },
+          {
+            "name": "d_term",
+            "expr": {
+              "Mul": [
+                {
+                  "Var": "kd"
+                },
+                {
+                  "Var": "filt_d"
+                }
+              ]
+            }
+          },
+          {
+            "name": "cand",
+            "expr": {
+              "Add": [
+                {
+                  "Var": "integral"
+                },
+                {
+                  "Mul": [
+                    {
+                      "Mul": [
+                        {
+                          "Var": "ki"
+                        },
+                        {
+                          "Var": "error"
+                        }
+                      ]
+                    },
+                    {
+                      "Var": "dt"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "name": "unsat",
+            "expr": {
+              "Add": [
+                {
+                  "Add": [
+                    {
+                      "Var": "p_term"
+                    },
+                    {
+                      "Var": "cand"
+                    }
+                  ]
+                },
+                {
+                  "Var": "d_term"
+                }
+              ]
+            }
+          },
+          {
+            "name": "out",
+            "expr": {
+              "Min": [
+                {
+                  "Max": [
+                    {
+                      "Var": "unsat"
+                    },
+                    {
+                      "Var": "lo"
+                    }
+                  ]
+                },
+                {
+                  "Var": "hi"
+                }
+              ]
+            }
+          },
+          {
+            "name": "deeper",
+            "expr": {
+              "Or": [
+                {
+                  "And": [
+                    {
+                      "Gt": [
+                        {
+                          "Var": "unsat"
+                        },
+                        {
+                          "Var": "hi"
+                        }
+                      ]
+                    },
+                    {
+                      "Gt": [
+                        {
+                          "Var": "error"
+                        },
+                        {
+                          "Num": 0.0
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "And": [
+                    {
+                      "Lt": [
+                        {
+                          "Var": "unsat"
+                        },
+                        {
+                          "Var": "lo"
+                        }
+                      ]
+                    },
+                    {
+                      "Lt": [
+                        {
+                          "Var": "error"
+                        },
+                        {
+                          "Num": 0.0
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "outputs": [
+          {
+            "name": "out",
+            "ty": "F32",
+            "unit": "V",
+            "range": [
+              -24.0,
+              24.0
+            ]
+          }
+        ],
+        "next": [
+          {
+            "name": "integral",
+            "expr": {
+              "Select": [
+                {
+                  "Var": "reset"
+                },
+                {
+                  "Num": 0.0
+                },
+                {
+                  "Min": [
+                    {
+                      "Max": [
+                        {
+                          "Select": [
+                            {
+                              "Var": "deeper"
+                            },
+                            {
+                              "Var": "integral"
+                            },
+                            {
+                              "Var": "cand"
+                            }
+                          ]
+                        },
+                        {
+                          "Var": "lo"
+                        }
+                      ]
+                    },
+                    {
+                      "Var": "hi"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "name": "prev_meas",
+            "expr": {
+              "Select": [
+                {
+                  "Var": "reset"
+                },
+                {
+                  "Num": 0.0
+                },
+                {
+                  "Var": "meas"
+                }
+              ]
+            }
+          },
+          {
+            "name": "has_prev",
+            "expr": {
+              "Not": {
+                "Var": "reset"
+              }
+            }
+          },
+          {
+            "name": "filt",
+            "expr": {
+              "Select": [
+                {
+                  "Var": "reset"
+                },
+                {
+                  "Num": 0.0
+                },
+                {
+                  "Var": "filt_d"
+                }
+              ]
+            }
+          },
+          {
+            "name": "filt_init",
+            "expr": {
+              "Not": {
+                "Var": "reset"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "position_pid",
+      "compute": {
+        "inputs": [
+          {
+            "name": "setpoint",
+            "ty": "F32",
+            "unit": "rad"
+          },
+          {
+            "name": "measured",
+            "ty": "F32",
+            "unit": "rad",
+            "range": [
+              -100.0,
+              100.0
+            ],
+            "glitch": true
+          },
+          {
+            "name": "reset",
+            "ty": "Bool",
+            "unit": "1"
+          }
+        ],
+        "params": [
+          {
+            "name": "kp",
+            "value": 1.7999999523162842,
+            "unit": "A/rad"
+          },
+          {
+            "name": "ki",
+            "value": 6.0,
+            "unit": "A/(rad*s)"
+          },
+          {
+            "name": "kd",
+            "value": 0.1080000028014183,
+            "unit": "A*s/rad"
+          },
+          {
+            "name": "dt",
+            "value": 0.004999999888241291,
+            "unit": "s"
+          },
+          {
+            "name": "smoothing",
+            "value": 1.0,
+            "unit": "1"
+          },
+          {
+            "name": "lo",
+            "value": -8.0,
+            "unit": "A"
+          },
+          {
+            "name": "hi",
+            "value": 8.0,
+            "unit": "A"
+          }
+        ],
+        "state": [
+          {
+            "name": "integral",
+            "init": {
+              "Num": 0.0
+            },
+            "unit": "A",
+            "range": [
+              -8.0,
+              8.0
+            ]
+          },
+          {
+            "name": "prev_meas",
+            "init": {
+              "Num": 0.0
+            },
+            "unit": "rad",
+            "range": [
+              -100.0,
+              100.0
+            ]
+          },
+          {
+            "name": "has_prev",
+            "init": {
+              "Bool": false
+            },
+            "unit": "1"
+          },
+          {
+            "name": "filt",
+            "init": {
+              "Num": 0.0
+            },
+            "unit": "rad/s",
+            "range": [
+              -80000.00178813939,
+              80000.00178813939
+            ]
+          },
+          {
+            "name": "filt_init",
+            "init": {
+              "Bool": false
+            },
+            "unit": "1"
+          }
+        ],
+        "defs": [
+          {
+            "name": "meas",
+            "expr": {
+              "Select": [
+                {
+                  "IsFinite": {
+                    "Var": "measured"
+                  }
+                },
+                {
+                  "Var": "measured"
+                },
+                {
+                  "Var": "prev_meas"
+                }
+              ]
+            }
+          },
+          {
+            "name": "error",
+            "expr": {
+              "Sub": [
+                {
+                  "Var": "setpoint"
+                },
+                {
+                  "Var": "meas"
+                }
+              ]
+            }
+          },
+          {
+            "name": "p_term",
+            "expr": {
+              "Mul": [
+                {
+                  "Var": "kp"
+                },
+                {
+                  "Var": "error"
+                }
+              ]
+            }
+          },
+          {
+            "name": "raw_d",
+            "expr": {
+              "Select": [
+                {
+                  "Var": "has_prev"
+                },
+                {
+                  "Div": [
+                    {
+                      "Sub": [
+                        {
+                          "Var": "prev_meas"
+                        },
+                        {
+                          "Var": "meas"
+                        }
+                      ]
+                    },
+                    {
+                      "Var": "dt"
+                    }
+                  ]
+                },
+                {
+                  "Num": 0.0
+                }
+              ]
+            }
+          },
+          {
+            "name": "filt_d",
+            "expr": {
+              "Select": [
+                {
+                  "Var": "filt_init"
+                },
+                {
+                  "Add": [
+                    {
+                      "Mul": [
+                        {
+                          "Var": "smoothing"
+                        },
+                        {
+                          "Var": "raw_d"
+                        }
+                      ]
+                    },
+                    {
+                      "Mul": [
+                        {
+                          "Sub": [
+                            {
+                              "Num": 1.0
+                            },
+                            {
+                              "Var": "smoothing"
+                            }
+                          ]
+                        },
+                        {
+                          "Var": "filt"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Var": "raw_d"
+                }
+              ]
+            }
+          },
+          {
+            "name": "d_term",
+            "expr": {
+              "Mul": [
+                {
+                  "Var": "kd"
+                },
+                {
+                  "Var": "filt_d"
+                }
+              ]
+            }
+          },
+          {
+            "name": "cand",
+            "expr": {
+              "Add": [
+                {
+                  "Var": "integral"
+                },
+                {
+                  "Mul": [
+                    {
+                      "Mul": [
+                        {
+                          "Var": "ki"
+                        },
+                        {
+                          "Var": "error"
+                        }
+                      ]
+                    },
+                    {
+                      "Var": "dt"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "name": "unsat",
+            "expr": {
+              "Add": [
+                {
+                  "Add": [
+                    {
+                      "Var": "p_term"
+                    },
+                    {
+                      "Var": "cand"
+                    }
+                  ]
+                },
+                {
+                  "Var": "d_term"
+                }
+              ]
+            }
+          },
+          {
+            "name": "out",
+            "expr": {
+              "Min": [
+                {
+                  "Max": [
+                    {
+                      "Var": "unsat"
+                    },
+                    {
+                      "Var": "lo"
+                    }
+                  ]
+                },
+                {
+                  "Var": "hi"
+                }
+              ]
+            }
+          },
+          {
+            "name": "deeper",
+            "expr": {
+              "Or": [
+                {
+                  "And": [
+                    {
+                      "Gt": [
+                        {
+                          "Var": "unsat"
+                        },
+                        {
+                          "Var": "hi"
+                        }
+                      ]
+                    },
+                    {
+                      "Gt": [
+                        {
+                          "Var": "error"
+                        },
+                        {
+                          "Num": 0.0
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "And": [
+                    {
+                      "Lt": [
+                        {
+                          "Var": "unsat"
+                        },
+                        {
+                          "Var": "lo"
+                        }
+                      ]
+                    },
+                    {
+                      "Lt": [
+                        {
+                          "Var": "error"
+                        },
+                        {
+                          "Num": 0.0
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "outputs": [
+          {
+            "name": "out",
+            "ty": "F32",
+            "unit": "A",
+            "range": [
+              -8.0,
+              8.0
+            ]
+          }
+        ],
+        "next": [
+          {
+            "name": "integral",
+            "expr": {
+              "Select": [
+                {
+                  "Var": "reset"
+                },
+                {
+                  "Num": 0.0
+                },
+                {
+                  "Min": [
+                    {
+                      "Max": [
+                        {
+                          "Select": [
+                            {
+                              "Var": "deeper"
+                            },
+                            {
+                              "Var": "integral"
+                            },
+                            {
+                              "Var": "cand"
+                            }
+                          ]
+                        },
+                        {
+                          "Var": "lo"
+                        }
+                      ]
+                    },
+                    {
+                      "Var": "hi"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "name": "prev_meas",
+            "expr": {
+              "Select": [
+                {
+                  "Var": "reset"
+                },
+                {
+                  "Num": 0.0
+                },
+                {
+                  "Var": "meas"
+                }
+              ]
+            }
+          },
+          {
+            "name": "has_prev",
+            "expr": {
+              "Not": {
+                "Var": "reset"
+              }
+            }
+          },
+          {
+            "name": "filt",
+            "expr": {
+              "Select": [
+                {
+                  "Var": "reset"
+                },
+                {
+                  "Num": 0.0
+                },
+                {
+                  "Var": "filt_d"
+                }
+              ]
+            }
+          },
+          {
+            "name": "filt_init",
+            "expr": {
+              "Not": {
+                "Var": "reset"
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
