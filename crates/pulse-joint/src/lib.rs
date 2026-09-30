@@ -9,6 +9,7 @@
 #[rustfmt::skip]
 #[allow(unused_parens, non_snake_case, clippy::double_parens, clippy::manual_clamp, clippy::eq_op)]
 pub mod generated;
+pub mod io;
 pub mod params;
 
 use multicalc::control::Pid;

@@ -1,0 +1,7 @@
+[build]
+target = "thumbv8m.main-none-eabihf"
+
+[target.thumbv8m.main-none-eabihf]
+rustflags = ["-C", "link-arg=--nmagic", "-C", "link-arg=-Tlink.x", "-C", "target-cpu=cortex-m33"]
+# Load the ELF over USB (BOOTSEL), verify, run. With a debug probe: `probe-rs run --chip RP235x`.
+runner = "picotool load -u -v -x -t elf"

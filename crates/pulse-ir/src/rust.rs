@@ -170,5 +170,25 @@ pub fn emit(name: &str, c: &Compute) -> String {
         }
     }
     writeln!(s, "        out\n    }}\n}}").unwrap();
+    // Input contracts, so the code that feeds the step enforces the IR's ranges rather than a copy of them. Each bound
+    // is the nearest f32, which lies inside the range's f32 hull (what the proofs assume): admitting only values
+    // within these constants keeps every input inside its contract.
+    for p in c.inputs.iter().filter(|p| p.range.is_some()) {
+        let [lo, hi] = p.range.unwrap();
+        let bad = if p.glitch {
+            "; a bad one may be NaN or +-inf"
+        } else {
+            ""
+        };
+        writeln!(
+            s,
+            "\n/// `{}`: a good sample lies in this range{bad}.\npub const {}: [f32; 2] = [{}, {}];",
+            p.name,
+            p.name.to_uppercase(),
+            lit(lo as f32),
+            lit(hi as f32)
+        )
+        .unwrap();
+    }
     s
 }

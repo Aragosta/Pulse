@@ -123,3 +123,12 @@ impl Firmware {
         out
     }
 }
+
+/// `sensor__theta`: a good sample lies in this range; a bad one may be NaN or +-inf.
+pub const SENSOR__THETA: [f32; 2] = [(-100.0_f32), 100.0_f32];
+
+/// `sensor__current`: a good sample lies in this range; a bad one may be NaN or +-inf.
+pub const SENSOR__CURRENT: [f32; 2] = [(-64.0_f32), 64.0_f32];
+
+/// `sensor__temp`: a good sample lies in this range; a bad one may be NaN or +-inf.
+pub const SENSOR__TEMP: [f32; 2] = [(-40.0_f32), 200.0_f32];

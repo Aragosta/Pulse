@@ -16,3 +16,6 @@ jobs:
       - run: cargo test --workspace
       # The no_std core must keep building for the RP2350 (Cortex-M33).
       - run: cargo build -p pulse-joint --target thumbv8m.main-none-eabihf
+      # The single joint on the RP2350: the flashable image must keep building (its .cargo/config.toml sets the target).
+      - run: cargo fmt --check && cargo clippy --release -- -D warnings && cargo build --release
+        working-directory: examples/single_joint_rp2350

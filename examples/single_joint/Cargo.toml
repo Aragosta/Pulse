@@ -12,3 +12,6 @@ path = "src/main.rs"
 pulse-ir = { path = "../../crates/pulse-ir" }
 pulse-joint = { path = "../../crates/pulse-joint" }
 serde_json = "1.0"
+
+[dev-dependencies]
+pio = "0.3"

@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/pulse-ir", "crates/pulse-joint", "examples/single_joint"]
+# Built for the chip only (thumbv8m.main-none-eabihf), with its own lockfile (see its src/main.rs).
+exclude = ["examples/single_joint_rp2350"]
 
 [profile.debug-optimized]
 inherits = "dev"
