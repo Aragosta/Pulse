@@ -3,6 +3,7 @@
 
 pub mod class1;
 pub mod class3;
+pub mod evidence;
 pub mod expr;
 pub mod graph;
 pub mod rust;

@@ -5,6 +5,20 @@ Facts are marked **verified** (checked against a source, linked) or **unverified
 
 ## Decisions
 
+### D-008: One meaning for the whole graph; the firmware is one generated step (Decided, 2026-09-30)
+
+**Problem.** Block behaviour was precise, but what the whole system means lived in four places that shared no code: Class 1's comments, the differential test's simulator, Copper plus hand-written `tasks.rs`, and per-block proofs. The glue that wired verified pieces together was itself hand-written and unverified.
+
+**Decision.** [SEMANTICS.md](SEMANTICS.md) states what an IR means. `graph::firmware` composes every block with `compute` into one flat `Compute` run once per base tick (slow blocks fire on a counter and hold state and outputs between firings; blocks without `compute` are the outside world, and edges to and from them are the firmware's typed, contracted inputs and outputs). Interpreter, Class 3 proofs and codegen all read that one object, so the generated `Firmware::step()` is the proved system, like SCADE/Lustre. Components (`Stmt::Use`, flattened with `{instance}__` prefixes) and units (`units.rs`) are in the core before more features build on it. `pulse_ir::evidence` binds proved claims, assumptions and open items to the IR's content hash.
+
+**Copper.** Supersedes D-002. With one generated step, Copper was only host harness: a config generator and six task wrappers for nothing the proofs use. The example is a plain loop; wrapping `Firmware::step()` in one Copper task is small if logging/replay is wanted.
+
+**Evidence.** Whole firmware bit-identical to the hand-written controllers wired as the Copper tasks wired them (200k ticks incl. glitches, NaN temperatures, fault resets) and to the IR interpreter (50k ticks); stall oracle unchanged (16840/37160). Class 3 proves 11 state invariants and 8 output ranges on the whole firmware. Seven unit mutations refused. Graph wiring errors refused (unconnected or doubly driven inputs, unknown ports, unit mismatch, delays into firmware, bad rates).
+
+**Found while writing it down.** A delay on an edge into firmware would have been silently ignored (the step has no delay buffers): now refused. A range bound that is not an f32 number made a held state fail its own invariant: ranges now mean their f32 hull, on entry and on check.
+
+**Limits.** Components are proved per parameter set (flattened), not once generically. Invariants are non-relational, so relations must be stated (the integrator clamp). Delays and phase offsets inside firmware are not supported yet. Codegen equals the interpreter by construction and by test, not by proof.
+
 ### D-007: Behaviour lives in the IR; one walk, many interpretations (Decided, 2026-09-30)
 
 **Goal restated.** Model in (physics, control, ML), verified firmware or verified live commands out; nobody hand-writes firmware. So the IR must hold *what a block computes*, not a path to hand-written Rust, or what is verified and what ships are two different things.
@@ -123,7 +137,7 @@ Copper's reference bare-metal platform is a **Pimoroni Pico Plus 2 (RP2350B)** w
 - `f32::clamp` panics on a NaN bound and drags in float-formatting code, but bare `max`/`min` is not the fix: `f32::max(NaN, x) == x`, so a NaN setpoint came out as full reverse current and a NaN scale disabled the limit. Generated code guards with comparisons that NaN fails (`if x >= 0.0`, `is_finite`) and maps NaN to the safe value (0 A, `FAULT`).
 - **Check for panics on the final firmware binary, not the library.** rustc treats small functions as cross-crate-inlinable and does not emit them in the library, so a library-level grep can miss them.
 
-### D-002: Multi-rate on Copper via decimation (Decided, 2026-09-29)
+### D-002: Multi-rate on Copper via decimation (Superseded by D-008, 2026-09-30)
 
 Copper has one loop rate (`runtime.rate_target_hz`, verified). Pulse runs an 8 kHz base tick; 200 Hz blocks act on every 40th tick and republish their held output between activations. Every cross-rate edge must declare its hold in the IR (`Decimate(n)` fast to slow, `Zoh` slow to fast); `pulse-ir` rejects any edge that doesn't. Tick budget is checked as the sum of all WCET budgets, because every task runs (fires or republishes) sequentially in one slot on every tick.
 

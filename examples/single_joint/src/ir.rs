@@ -685,6 +685,17 @@ mod tests {
         );
     }
 
+    /// Evidence names the exact model: same IR, same hash; any change to the model, a new hash.
+    #[test]
+    fn evidence_hash_follows_the_model() {
+        let hash = |ir: &Ir| pulse_ir::evidence::evidence(ir).unwrap().ir_hash;
+        let mut ir = single_joint();
+        let h = hash(&ir);
+        assert_eq!(h, hash(&single_joint()));
+        ir.components[0].compute.params[0].value += 1e-3; // a gain, slightly
+        assert_ne!(h, hash(&ir));
+    }
+
     #[test]
     fn json_round_trip_still_passes_class1() {
         let ir = single_joint();

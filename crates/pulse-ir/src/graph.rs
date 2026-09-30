@@ -55,9 +55,10 @@ pub fn firmware(ir: &Ir) -> Result<Firmware, Vec<String>> {
     // Edges must name existing ports on firmware ends, feed each firmware input exactly once, and agree on units.
     for e in &ir.edges {
         let (f, t) = (is_fw(&e.from), is_fw(&e.to));
-        if f && t && e.delay_ticks > 0 {
+        // The generated step has no delay buffers yet: a delay into firmware would be silently dropped.
+        if t && e.delay_ticks > 0 {
             bad.push(format!(
-                "{} -> {}: delays inside the firmware are not supported yet",
+                "{} -> {}: delays on edges into the firmware are not supported yet",
                 e.from, e.to
             ));
         }
@@ -486,7 +487,12 @@ mod tests {
             err(&|ir| ir.edges[1].from_port = Some("nope".into())).contains("slow has no output")
         );
         assert!(err(&|ir| ir.edges[0].to_port = Some("nope".into())).contains("fast has no input"));
-        assert!(err(&|ir| ir.edges[1].delay_ticks = 1).contains("delays inside the firmware"));
+        assert!(
+            err(&|ir| ir.edges[1].delay_ticks = 1).contains("delays on edges into the firmware")
+        );
+        assert!(
+            err(&|ir| ir.edges[0].delay_ticks = 1).contains("delays on edges into the firmware")
+        );
         assert!(
             err(&|ir| ir.edges[0].from_port = Some("a__b".into())).contains("not an identifier")
         );

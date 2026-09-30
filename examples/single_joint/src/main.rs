@@ -86,6 +86,14 @@ fn main() {
         );
         return;
     }
+    if arg.as_deref() == Some("--evidence") {
+        let e = pulse_ir::evidence::evidence(&ir).unwrap_or_else(|v| refuse("Evidence", v));
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&e).expect("evidence serializes")
+        );
+        return;
+    }
     let seconds: u64 = arg.and_then(|s| s.parse().ok()).unwrap_or(12);
 
     // Static: refuse to run firmware that cannot be proven.
@@ -147,6 +155,11 @@ fn main() {
     println!(
         "  [ -- ] WCET <= budget    NOT PROVEN: no static WCET bound yet (see NOTES.md D-001)"
     );
+    let ev = pulse_ir::evidence::evidence(&ir).unwrap_or_else(|v| refuse("Evidence", v));
+    println!("\nfor IR {} (full list: --evidence), ASSUMING", ev.ir_hash);
+    for a in &ev.assumed {
+        println!("  - {a}");
+    }
 
     println!(
         "\nrunning {seconds} s of sim at {BASE_HZ} Hz ({} ticks)...",
