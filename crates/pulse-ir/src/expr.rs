@@ -104,6 +104,8 @@ pub struct Use {
 pub enum Stmt {
     Let(Def),
     Use(Use),
+    /// A state machine, lowered by `Compute::flatten` (`crate::fsm`).
+    Fsm(crate::fsm::Fsm),
 }
 impl From<Def> for Stmt {
     fn from(d: Def) -> Stmt {
@@ -469,6 +471,14 @@ impl Compute {
                     flat.defs.push(Stmt::Let(d.clone()));
                     continue;
                 }
+                Stmt::Fsm(f) => {
+                    let (params, state, def, update) = f.lower();
+                    flat.params.extend(params);
+                    flat.state.push(state);
+                    flat.defs.push(Stmt::Let(def));
+                    flat.next.push(update);
+                    continue;
+                }
                 Stmt::Use(u) => u,
             };
             let comp = lib
@@ -548,6 +558,7 @@ impl Compute {
                 .flat_map(|s| match s {
                     Stmt::Let(d) => vec![&d.expr],
                     Stmt::Use(o) => o.bind.iter().map(|b| &b.expr).collect(),
+                    Stmt::Fsm(f) => f.transitions.iter().map(|t| &t.guard).collect(),
                 })
                 .chain(self.next.iter().map(|d| &d.expr))
                 .collect();
@@ -814,7 +825,7 @@ mod tests {
             .iter()
             .map(|s| match s {
                 Stmt::Let(d) => d.name.as_str(),
-                Stmt::Use(_) => "use",
+                _ => "not flat",
             })
             .collect();
         assert_eq!(names[0], "p__x");

@@ -64,7 +64,7 @@ impl Firmware {
         let v_position_loop__pid__deeper = (((v_position_loop__pid__unsat > 8.0_f32) && (v_position_loop__pid__error > 0.0_f32)) || ((v_position_loop__pid__unsat < (-8.0_f32)) && (v_position_loop__pid__error < 0.0_f32)));
         let v_position_loop__amps = v_position_loop__pid__out;
         let v_position_loop__amps__now = (if v___fire_40 { v_position_loop__amps } else { self.position_loop__amps__held });
-        let v_thermal_fsm__state = (if ((v_sensor__temp > 100.0_f32) || (!(v_sensor__temp == v_sensor__temp))) { 2.0_f32 } else { (if (self.thermal_fsm__mode == 2.0_f32) { 2.0_f32 } else { (if ((self.thermal_fsm__mode == 0.0_f32) && (v_sensor__temp > 80.0_f32)) { 1.0_f32 } else { (if ((self.thermal_fsm__mode == 1.0_f32) && (v_sensor__temp < 70.0_f32)) { 0.0_f32 } else { self.thermal_fsm__mode }) }) }) });
+        let v_thermal_fsm__state = (if ((v_sensor__temp > 100.0_f32) || (!(v_sensor__temp == v_sensor__temp))) { 2.0_f32 } else { (if ((self.thermal_fsm__mode == 0.0_f32) && (v_sensor__temp > 80.0_f32)) { 1.0_f32 } else { (if ((self.thermal_fsm__mode == 1.0_f32) && (v_sensor__temp < 70.0_f32)) { 0.0_f32 } else { self.thermal_fsm__mode }) }) });
         let v_thermal_fsm__scale = (if (v_thermal_fsm__state == 0.0_f32) { 1.0_f32 } else { (if (v_thermal_fsm__state == 1.0_f32) { 0.75_f32 } else { 0.0_f32 }) });
         let v_thermal_fsm__state__now = (if v___fire_40 { v_thermal_fsm__state } else { self.thermal_fsm__state__held });
         let v_thermal_fsm__scale__now = (if v___fire_40 { v_thermal_fsm__scale } else { self.thermal_fsm__scale__held });

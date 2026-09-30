@@ -42,6 +42,10 @@ The same expressions read as f64 are the **model**; read as f32 they are the **f
 
 A **component** is a named `compute` in the IR's library. `Use { name, component, bind }` places an instance: each component input is bound to an expression in the enclosing scope. **Flattening** inlines it: its params, state and defs appear as `{name}__{x}`, an input bound to a variable or literal is substituted where it is used, and any other binding becomes a def. The enclosing scope may read only the instance's outputs. Names written by a user never contain `__`; that separator belongs to flattening. Every analysis and codegen works on the flat form.
 
+## 4a. State machines
+
+`Stmt::Fsm` declares a state variable, named states (each state's code is its index, and its name is a param with that code), an initial state, and transitions in priority order, each with the states it leaves from (empty: any) and a boolean guard. On each firing the first transition whose `from` matches the current state and whose guard holds is taken; if none is, the state stays. So every machine is deterministic and total by construction. The machine is lowered to a state variable (range `[0, n-1]`, proved as an invariant) and a `select` chain before any analysis. Structural checks: states are unique, every referenced state exists, and every state is reachable from the initial one over the transition graph. Whether a guard can ever hold is not checked yet.
+
 ## 5. Units
 
 Every numeric port, param and state may carry a unit (`V`, `A`, `V/(A*s)`, `1` for dimensionless). `+ − max min select` and comparisons need equal units, `× ÷` combine them, a bare literal adopts its context. Symbols are independent: no conversions, so one spelling per quantity. Components are checked once; each binding against the component's declared input unit; each firmware edge between blocks must connect equal units.

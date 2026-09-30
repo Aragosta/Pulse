@@ -64,6 +64,30 @@ pub fn evidence(ir: &Ir) -> Result<Evidence, Vec<Violation>> {
             ));
         }
     }
+    let computes = ir
+        .blocks
+        .iter()
+        .filter_map(|b| Some((b.id.as_str(), b.compute.as_ref()?)))
+        .chain(ir.components.iter().map(|c| (c.name.as_str(), &c.compute)));
+    for (at, comp) in computes {
+        for s in &comp.defs {
+            if let crate::expr::Stmt::Fsm(f) = s {
+                let absorbing = f.absorbing();
+                proved.push(format!(
+                    "{at}.{}: states {} all reachable from {}; deterministic (first enabled transition wins) and \
+                     total (none enabled: stay){}",
+                    f.state,
+                    f.states.join(", "),
+                    f.initial,
+                    if absorbing.is_empty() {
+                        String::new()
+                    } else {
+                        format!("; absorbing: {}", absorbing.join(", "))
+                    }
+                ));
+            }
+        }
+    }
     let c = &fw.compute;
     for s in c.state.iter().filter_map(|s| Some((s, s.range?))) {
         proved.push(format!(

@@ -167,8 +167,19 @@ fn unit(e: &Expr, scope: &[(String, U)]) -> Result<U, String> {
             same(u(x)?, u(y)?, e)?;
             U::Bool
         }
-        And(..) | Or(..) | Not(_) | IsFinite(_) => U::Bool,
-        Select(_, x, y) => same(u(x)?, u(y)?, e)?,
+        And(x, y) | Or(x, y) => {
+            u(x)?;
+            u(y)?;
+            U::Bool
+        }
+        Not(a) | IsFinite(a) => {
+            u(a)?;
+            U::Bool
+        }
+        Select(c, x, y) => {
+            u(c)?;
+            same(u(x)?, u(y)?, e)?
+        }
     })
 }
 
@@ -198,6 +209,15 @@ pub fn check(c: &Compute, lib: &[Component]) -> Vec<String> {
         };
         decl(&s.name, &s.unit, ty, &mut scope);
     }
+    // A state machine's state variable and state names are in scope from the start (they are state and params).
+    for s in &c.defs {
+        if let Stmt::Fsm(f) = s {
+            decl(&f.state, &Some("1".into()), Ty::F32, &mut scope);
+            for n in &f.states {
+                decl(n, &Some("1".into()), Ty::F32, &mut scope);
+            }
+        }
+    }
     let agree = |name: &str, got: Result<U, String>, want: U, bad: &mut Vec<String>| match got {
         Err(e) => bad.push(format!("{name}: {e}")),
         Ok(got) => {
@@ -216,6 +236,14 @@ pub fn check(c: &Compute, lib: &[Component]) -> Vec<String> {
                     U::Unknown
                 });
                 scope.push((d.name.clone(), u));
+            }
+            Stmt::Fsm(f) => {
+                for t in &f.transitions {
+                    if let Err(e) = unit(&t.guard, &scope) {
+                        bad.push(format!("{} -> {}: {e}", f.state, t.to));
+                    }
+                }
+                scope.push((f.next.clone(), U::Known(Unit(BTreeMap::new()))));
             }
             Stmt::Use(inst) => {
                 let Some(comp) = lib.iter().find(|x| x.name == inst.component) else {
@@ -313,5 +341,32 @@ mod tests {
         assert!(!ok(vec![("out", var("i") + var("v"))], "A").is_empty());
         assert!(!ok(vec![("out", var("i"))], "V").is_empty());
         assert!(!ok(vec![("c", var("i").gt(var("v"))), ("out", var("i"))], "A").is_empty());
+        // Inside boolean operators, is_finite and a select's condition too.
+        let hidden = (var("i") + var("v")).gt(num(0.0));
+        assert!(
+            !ok(
+                vec![
+                    ("c", hidden.clone().and(Expr::Bool(true))),
+                    ("out", var("i"))
+                ],
+                "A"
+            )
+            .is_empty()
+        );
+        assert!(!ok(vec![("c", hidden.clone().not()), ("out", var("i"))], "A").is_empty());
+        assert!(
+            !ok(
+                vec![("c", (var("i") + var("v")).is_finite()), ("out", var("i"))],
+                "A"
+            )
+            .is_empty()
+        );
+        assert!(
+            !ok(
+                vec![("out", crate::expr::select(hidden, var("i"), var("i")))],
+                "A"
+            )
+            .is_empty()
+        );
     }
 }

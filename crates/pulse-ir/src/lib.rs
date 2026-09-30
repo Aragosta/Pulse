@@ -5,6 +5,7 @@ pub mod class1;
 pub mod class3;
 pub mod evidence;
 pub mod expr;
+pub mod fsm;
 pub mod graph;
 pub mod rust;
 pub mod units;
@@ -131,15 +132,24 @@ impl Ir {
         let mut names: Vec<&str> = c.inputs.iter().map(|p| p.name.as_str()).collect();
         names.extend(c.params.iter().map(|p| p.name.as_str()));
         names.extend(c.state.iter().map(|s| s.name.as_str()));
-        names.extend(c.defs.iter().map(|s| match s {
-            Stmt::Let(d) => d.name.as_str(),
-            Stmt::Use(u) => u.name.as_str(),
-        }));
-        let mut bad: Vec<String> = names
-            .iter()
-            .filter(|n| n.contains("__"))
-            .map(|n| format!("{n:?}: `__` is reserved for flattened names"))
-            .collect();
+        let mut bad = Vec::new();
+        for s in &c.defs {
+            match s {
+                Stmt::Let(d) => names.push(&d.name),
+                Stmt::Use(u) => names.push(&u.name),
+                Stmt::Fsm(f) => {
+                    names.extend([f.state.as_str(), f.next.as_str()]);
+                    names.extend(f.states.iter().map(|s| s.as_str()));
+                    bad.extend(f.check());
+                }
+            }
+        }
+        bad.extend(
+            names
+                .iter()
+                .filter(|n| n.contains("__"))
+                .map(|n| format!("{n:?}: `__` is reserved for flattened names")),
+        );
         match self.flat(c) {
             Ok(f) => bad.extend(f.validate()),
             Err(e) => bad.push(e),

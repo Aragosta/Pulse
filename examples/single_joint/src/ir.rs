@@ -5,6 +5,7 @@ use crate::params::*;
 use pulse_ir::expr::{
     Component, Compute, Def, Expr, Param, Port, StateVar, Stmt, Ty, Use, num, select, var,
 };
+use pulse_ir::fsm::{Fsm, Transition};
 use pulse_ir::{Block, Edge, Formalism::*, Hold, IR_VERSION, Ir, SensorSpec};
 
 fn def(name: &str, expr: Expr) -> Def {
@@ -263,32 +264,39 @@ pub fn position_loop() -> Compute {
 }
 
 /// The 200 Hz thermal state machine: nominal -> derating -> fault (latched), hysteresis on recovery, NaN faults.
-/// Codes: 0 nominal, 1 derating, 2 fault. `scale` limits the current: 1, `DERATE_SCALE`, 0.
+/// `scale` limits the current: 1 nominal, `DERATE_SCALE` derating, 0 fault.
 pub fn thermal_fsm() -> Compute {
-    let (nominal, derating, fault) = (var("nominal"), var("derating"), var("fault"));
     let temp = || var("temp");
-    let mode = || var("mode");
-    let state = select(
-        temp().gt(var("t_fault")).or(temp().eq(temp()).not()),
-        fault.clone(),
-        select(
-            mode().eq(fault.clone()),
-            fault,
-            select(
-                mode().eq(nominal.clone()).and(temp().gt(var("t_derate"))),
-                derating.clone(),
-                select(
-                    mode().eq(derating.clone()).and(temp().lt(var("t_recover"))),
-                    nominal.clone(),
-                    mode(),
-                ),
+    let to = |from: &[&str], to: &str, guard: Expr| Transition {
+        from: from.iter().map(|s| s.to_string()).collect(),
+        to: to.into(),
+        guard,
+    };
+    let machine = Fsm {
+        state: "mode".into(),
+        next: "state".into(),
+        // The order fixes the codes the current loop and telemetry see: 0, 1, 2.
+        states: ["nominal", "derating", "fault"].map(String::from).to_vec(),
+        initial: "nominal".into(),
+        transitions: vec![
+            // From anywhere: over-temperature, or a broken (NaN) sensor. Fault then has no way out: latched.
+            to(
+                &[],
+                "fault",
+                temp().gt(var("t_fault")).or(temp().eq(temp()).not()),
             ),
-        ),
-    );
+            to(&["nominal"], "derating", temp().gt(var("t_derate"))),
+            to(&["derating"], "nominal", temp().lt(var("t_recover"))),
+        ],
+    };
     let scale = select(
-        var("state").eq(nominal),
+        var("state").eq(var("nominal")),
         num(1.0),
-        select(var("state").eq(derating), var("derate_scale"), num(0.0)),
+        select(
+            var("state").eq(var("derating")),
+            var("derate_scale"),
+            num(0.0),
+        ),
     );
     Compute {
         inputs: vec![Port {
@@ -300,17 +308,14 @@ pub fn thermal_fsm() -> Compute {
             param("t_derate", T_DERATE as f64, "degC"),
             param("t_recover", T_RECOVER as f64, "degC"),
             param("derate_scale", DERATE_SCALE as f64, "1"),
-            param("nominal", pulse_joint::NOMINAL as f64, "1"),
-            param("derating", pulse_joint::DERATING as f64, "1"),
-            param("fault", pulse_joint::FAULT as f64, "1"),
         ],
-        state: vec![sv("mode", num(0.0), "1", Some([0.0, 2.0]))],
-        defs: vec![def("state", state).into(), def("scale", scale).into()],
+        state: vec![],
+        defs: vec![Stmt::Fsm(machine), def("scale", scale).into()],
         outputs: vec![
             port("state", Ty::F32, "1", Some([0.0, 2.0])),
             port("scale", Ty::F32, "1", Some([0.0, 1.0])),
         ],
-        next: vec![def("mode", var("state"))],
+        next: vec![],
     }
 }
 
@@ -690,6 +695,27 @@ mod tests {
         assert!(
             worst < 1e-2,
             "f32 firmware drifts {worst} V from the f64 model"
+        );
+    }
+
+    /// A state machine with a state no transition can reach is refused, naming the state.
+    #[test]
+    fn unreachable_fsm_state_is_refused() {
+        let mut ir = single_joint();
+        let fsm = ir
+            .blocks
+            .iter_mut()
+            .find(|b| b.id == "thermal_fsm")
+            .unwrap();
+        let Stmt::Fsm(f) = &mut fsm.compute.as_mut().unwrap().defs[0] else {
+            unreachable!()
+        };
+        f.transitions.retain(|t| t.to != "derating");
+        let errs = pulse_ir::class1::check(&ir).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|v| v.msg.contains("derating is unreachable")),
+            "{errs:?}"
         );
     }
 
